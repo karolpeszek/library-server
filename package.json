@@ -1,0 +1,15 @@
+{
+  "dependencies": {
+    "base64url": "^3.0.1",
+    "crypto": "^1.0.1",
+    "express": "^4.18.2",
+    "fs": "^0.0.1-security",
+    "http": "^0.0.1-security",
+    "jsonwebtoken": "^9.0.0",
+    "mariadb": "^3.0.2",
+    "nodemailer": "^6.9.0",
+    "starkbank-ecdsa": "^1.1.5",
+    "uuid-by-string": "^4.0.0",
+    "ws": "^8.12.0"
+  }
+}
