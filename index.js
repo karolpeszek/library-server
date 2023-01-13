@@ -20,9 +20,13 @@ const privkey = fs.readFileSync(__dirname + '/jwt-priv.pem');
 const pubkey = fs.readFileSync(__dirname + '/jwt-pub.pem');
 const databaseCredential = require(__dirname + '/sql.json')
 
+const wssLogin = new webSocket.Server({ port: loginPort })
+const wssUpdates = new webSocket.Server({ port: updatesPort });
 var server = http.createServer(app).listen(registerPort, function () {
     console.log("Express server listening on port " + registerPort);
 });
+
+let updatesClientsList = [];
 
 app.post('/registerKey', function (req, response) {
     let userData = "";
@@ -75,7 +79,6 @@ app.post('/registerKey', function (req, response) {
         }
     });
 });
-
 app.post('/register', function (req, res) {
 
     let userData = "";
@@ -99,7 +102,6 @@ app.post('/register', function (req, res) {
     });
 
 });
-
 app.post('/lostkey', function (req, res) {
     let userData = "";
     req.on('data', (chunk) => {
@@ -120,156 +122,6 @@ app.post('/lostkey', function (req, res) {
         }
     });
 })
-
-
-function validateEmail(email) {
-    return String(email)
-        .toLowerCase()
-        .match(
-            /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/
-        );
-};
-
-function createAccount(mail) {
-    let pool = mariadb.createPool(databaseCredential);
-    pool.getConnection().then(conn => {
-        conn.query('USE ' + databaseCredential.database).then(() => {
-            let uuid = getUuid(mail);
-            conn.query("INSERT INTO users (uuid, admin, email) VALUES (?, ?, ?)", [uuid, false, mail]).then(res => {
-                console.log(res);
-
-            }).catch(err => {
-                console.log(err);
-            })
-            sendKeyRegistrationMail(mail);
-        }).catch(err => {
-            console.log(err);
-        })
-
-    });
-}
-
-async function sendKeyRegistrationMail(mail) {
-
-    let pool = mariadb.createPool(databaseCredential);
-    pool.getConnection().then(conn => {
-        conn.query('USE ' + databaseCredential.database).then(() => {
-            conn.query("SELECT * FROM users WHERE email=?", [mail]).then(async res => {
-
-                let user = res[0];
-                console.log(user);
-                var nonce = "";
-                const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-                for (var i = 0; i < 64; i++)
-                    nonce += possible.charAt(Math.floor(Math.random() * possible.length));
-
-                const claims = {
-                    iss: "library.karol.gay",
-                    kind: "key-reset",
-
-                    nonce: nonce,
-
-                    iat: Date.now(),
-                    exp: Date.now() + 900000,
-
-                    name: user.name | user.email,
-                    mail: user.email,
-                    uuid: user.uuid,
-                    admin: user.admin == 1
-
-                }
-                const token = jwt.sign(claims, privkey, { algorithm: 'RS256' });
-                const url = 'https://library.karol.gay/keyreset.html?token=' + token;
-
-                let transporter = nodemailer.createTransport({
-                    host: "in-v3.mailjet.com",
-                    port: 587,
-                    secure: false,
-                    auth: require('./smtp.json')
-                });
-
-                let message = {
-                    from: '"Library 📖" <library@karol.gay>',
-                    to: claims.mail,
-                    subject: 'Register new device with your account',
-                    text: 'Click this link to register a new device with your Library account. This link is only valid for 15 minutes. Note that your old device will get deauthorized.\n\n' + url,
-                    html: 'Click this link to register a new device with your Library account. This link is only valid for 15 minutes. Note that your old device will get deauthorized.\n\n' + url,
-                    attachments: []
-                };
-
-                try {
-                    await transporter.sendMail(message);
-
-                } catch (ex) {
-
-                }
-
-            }).catch(err => {
-                console.log(err);
-            })
-
-        }).catch(err => {
-            console.log(err);
-        })
-
-    });
-
-
-
-
-
-
-
-
-
-
-}
-
-function decodeAuthData(authData) {
-    let FLAG_UP = 0x01; // Flag for userPresence
-    let FLAG_UV = 0x04; // Flag for userVerification
-    let FLAG_AT = 0x40; // Flag for attestedCredentialData
-    let FLAG_ED = 0x80; // Flag for extensions
-
-    let rpIdHash = authData.slice(0, 32);
-    let flags = authData.slice(32, 33)[0];
-    let signCount = authData.slice(33, 37);
-
-    if ((flags & FLAG_AT) === 0x00) {
-        // no attestedCredentialData
-        return {
-            rpIdHash: rpIdHash,
-            flags: flags,
-            signCount: signCount
-        }
-    }
-
-    if (authData.length < 38) {
-        // attestedCredentialData missing
-        throw 'invalid authData.length';
-    }
-
-    let aaguid = authData.slice(37, 53);
-    let credentialIdLength = (authData[53] << 8) + authData[54]; //16-bit unsigned big-endian integer
-    let credenitalId = authData.slice(55, 55 + credentialIdLength);
-    let credentialPublicKey = this.decodeCredentialPublicKey(authData.slice(55 + credentialIdLength));
-
-    /* decoding extensions - not implemented */
-
-    return {
-        rpIdHash: rpIdHash,
-        flags: flags,
-        signCount: signCount,
-        attestedCredentialData: {
-            aaguid: aaguid,
-            credentialId: credenitalId,
-            credentialPublicKey: credentialPublicKey
-        }
-    }
-}
-
-const wssLogin = new webSocket.Server({ port: loginPort });
-
 wssLogin.on("connection", ws => {
 
     var nonce = "";
@@ -396,8 +248,8 @@ wssLogin.on("connection", ws => {
 
 
 });
-
 app.get('/books/get*', function (req, res) {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
     let cookie = req.headers.cookie.slice(6);
     console.log(cookie);
     let uuid = "";
@@ -416,13 +268,18 @@ app.get('/books/get*', function (req, res) {
             return;
         }
         let pool = mariadb.createPool(databaseCredential);
+        let isUserAdmin = decodedCookie.admin === true;
         pool.getConnection().then(conn => {
             conn.query('USE ' + databaseCredential.database).then(() => {
                 if (uuid)
                     conn.query('SELECT * FROM books WHERE uuid=?', [uuid]).then(response => {
                         if (response.length == 1) {
+                            response[0].availableToRent = response[0].rentedby == null;
+                            response[0].rentedByYou = response[0].rentedby == decodedCookie.uuid;
+                            if (!isUserAdmin) delete response[0].rentedby;
                             res.writeHead(200);
                             res.end(JSON.stringify(response[0]));
+                            return;
                         } else throw 'BOOK_DOES_NOT_EXIST';
 
                     }).catch(ex => {
@@ -435,8 +292,12 @@ app.get('/books/get*', function (req, res) {
                 else
                     conn.query('SELECT * FROM books ORDER BY title').then(response => {
                         let booksList = [];
-                        for (let i = 0; i < response.length; i++)booksList.push(response[i]);
-                        console.log(booksList);
+                        for (let i = 0; i < response.length; i++) {
+                            response[i].availableToRent = response[i].rentedby == null;
+                            response[i].rentedByYou = response[i].rentedby == decodedCookie.uuid;
+                            if (!isUserAdmin) delete response[i].rentedby;
+                            booksList.push(response[i]);
+                        }
                         res.writeHead(200);
                         res.end(JSON.stringify(booksList));
                     });
@@ -450,9 +311,6 @@ app.get('/books/get*', function (req, res) {
         });
 
 
-
-        console.log(decodedCookie);
-
     } catch (ex) {
         console.log(ex);
         res.writeHead(400);
@@ -462,7 +320,6 @@ app.get('/books/get*', function (req, res) {
 
 
 })
-
 app.post('/books/add', function (req, res) {
     let bookData = "";
     req.on('data', (chunk) => {
@@ -497,26 +354,73 @@ app.post('/books/add', function (req, res) {
                 let pool = mariadb.createPool(databaseCredential);
                 pool.getConnection().then(conn => {
                     conn.query('USE ' + databaseCredential.database).then(() => {
-                        try {
-                            conn.query('SELECT * FROM books WHERE uuid=?', [uuid]).then(response => {
-                                if (response.length == 0) {
-                                    conn.query('INSERT INTO books (uuid, title, author, isbn, description) VALUES (?, ?, ?, ?, ?)',
-                                        [uuid, book.title, book.author, book.isbn, book.description]
-                                    ).then(response => {
-                                        broadcastUpdate()
-                                        res.writeHead(200);
-                                        res.end();
+
+                        if (book.rentedby) {
+                            conn.query('SELECT * FROM users WHERE uuid=?', [book.rentedby]).then(response => {
+                                if (response.length == 0) throw 'USER_NOT_FOUND';
+                                let user = response[0];
+                                try {
+                                    conn.query('SELECT rentedby FROM books WHERE uuid=?', [uuid]).then(response => {
+
+                                        if (response.length == 0) {
+                                            conn.query('INSERT INTO books (uuid, title, author, isbn, description, rentedby) VALUES (?, ?, ?, ?, ?, ?)',
+                                                [uuid, book.title, book.author, book.isbn, book.description, book.rentedby]
+                                            ).then(() => {
+                                                let list = JSON.parse(user.rented);
+                                                list.push(uuid);
+                                                conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(list), book.rentedby]).then(() => {
+                                                    broadcastUpdate()
+                                                    res.writeHead(200);
+                                                    res.end();
+                                                }).catch(exception => {
+                                                    console.log(exception);
+                                                    res.writeHead(400);
+                                                    res.end(JSON.stringify({ error: exception }));
+                                                })
+
+                                            }).catch(exception => {
+                                                console.log(exception);
+                                                res.writeHead(400);
+                                                res.end(JSON.stringify({ error: exception }));
+                                            })
+                                        } else throw 'BOOK_ALREADY_EXISTS';
+                                    }).catch(exception => {
+                                        console.log(exception);
+                                        res.writeHead(400);
+                                        res.end(JSON.stringify({ error: exception }));
                                     })
-                                } else throw 'BOOK_ALREADY_EXISTS';
+
+                                } catch (ex) {
+                                    console.log(ex);
+                                }
                             }).catch(exception => {
                                 console.log(exception);
                                 res.writeHead(400);
                                 res.end(JSON.stringify({ error: exception }));
                             })
 
-                        } catch (ex) {
-                            console.log(ex);
                         }
+                        else
+                            try {
+                                conn.query('SELECT * FROM books WHERE uuid=?', [uuid]).then(response => {
+                                    if (response.length == 0) {
+                                        conn.query('INSERT INTO books (uuid, title, author, isbn, description) VALUES (?, ?, ?, ?, ?)',
+                                            [uuid, book.title, book.author, book.isbn, book.description]
+                                        ).then(response => {
+                                            broadcastUpdate()
+                                            res.writeHead(200);
+                                            res.end();
+                                        })
+                                    } else throw 'BOOK_ALREADY_EXISTS';
+                                }).catch(exception => {
+                                    console.log(exception);
+                                    res.writeHead(400);
+                                    res.end(JSON.stringify({ error: exception }));
+                                })
+
+                            } catch (ex) {
+                                console.log(ex);
+                            }
                     }).catch(err => {
 
                     })
@@ -543,7 +447,6 @@ app.post('/books/add', function (req, res) {
     })
 
 })
-
 app.patch('/books/update*', function (req, res) {
     let bookData = "";
     req.on('data', (chunk) => {
@@ -579,13 +482,99 @@ app.patch('/books/update*', function (req, res) {
                         try {
                             conn.query('SELECT * FROM books WHERE uuid=?', [uuid]).then(response => {
                                 if (response.length == 1) {
-                                    conn.query('UPDATE books SET title=?, author=?, isbn=?, description=? WHERE uuid=?',
-                                        [book.title, book.author, book.isbn, book.description, uuid]
-                                    ).then(response => {
-                                        broadcastUpdate()
-                                        res.writeHead(200);
-                                        res.end();
-                                    })
+                                    let oldBook = response[0];
+                                    let rentedby = book.rentedby;
+                                    console.log(oldBook);
+                                    if (book.rentedby)
+                                        conn.query('SELECT * FROM users WHERE uuid=?', [book.rentedby]).then(response => {
+                                            if (response.length == 0) throw 'USER_NOT_FOUND';
+
+                                            if (oldBook.rentedby) {
+                                                conn.query('SELECT rented FROM users WHERE uuid=?', [oldBook.rentedby]).then(response => {
+                                                    if (response.length == 0) throw 'USER_NOT_FOUND';
+                                                    console.log(response);
+                                                    let rentedList = JSON.parse(response[0].rented);
+                                                    console.log(rentedList);
+                                                    for (let i = 0; i < rentedList.length; i++)
+                                                        if (rentedList[i] == uuid)
+                                                            rentedList.splice(i, 1);
+                                                    console.log(rentedList);
+                                                    conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(rentedList), oldBook.rentedby]).catch(exception => {
+                                                        console.log(exception);
+                                                        res.writeHead(400);
+                                                        res.end(JSON.stringify({ error: exception }));
+                                                    })
+                                                }).catch(exception => {
+                                                    console.log(exception);
+                                                    res.writeHead(400);
+                                                    res.end(JSON.stringify({ error: exception }));
+                                                })
+                                            }
+                                            conn.query('UPDATE books SET rentedby=? WHERE uuid=?', [rentedby, uuid]).then(() => {
+                                                conn.query('SELECT rented FROM users WHERE uuid=?', [rentedby]).then(response => {
+                                                    let list = JSON.parse(response[0].rented);
+                                                    list.push(uuid);
+                                                    conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(list), rentedby]).then(() => {
+                                                        conn.query('UPDATE books SET title=?, author=?, isbn=?, description=? WHERE uuid=?',
+                                                            [book.title, book.author, book.isbn, book.description, uuid]
+                                                        ).then(() => {
+                                                            broadcastUpdate();
+                                                            res.writeHead(200);
+                                                            res.end();
+                                                            return;
+                                                        })
+
+
+
+                                                    })
+                                                })
+                                            })
+                                            //now rent the book
+                                        }).catch(exception => {
+                                            console.log(exception);
+                                            res.writeHead(400);
+                                            res.end(JSON.stringify({ error: exception }));
+                                        })
+                                    else {
+                                        if (oldBook.rentedby) {
+                                            conn.query('SELECT rented FROM users WHERE uuid=?', [oldBook.rentedby]).then(response => {
+                                                if (response.length == 0) throw 'USER_NOT_FOUND';
+                                                console.log(response);
+                                                let rentedList = JSON.parse(response[0].rented);
+                                                console.log(rentedList);
+                                                for (let i = 0; i < rentedList.length; i++)
+                                                    if (rentedList[i] == uuid)
+                                                        rentedList.splice(i, 1);
+                                                console.log(rentedList);
+                                                conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(rentedList), oldBook.rentedby]).then(() => {
+                                                    conn.query('UPDATE books SET title=?, author=?, isbn=?, description=?, rentedby=NULL WHERE uuid=?',
+                                                        [book.title, book.author, book.isbn, book.description, uuid]
+                                                    ).then(() => {
+                                                        broadcastUpdate();
+                                                        res.writeHead(200);
+                                                        res.end();
+                                                        return;
+                                                    })
+                                                }).catch(exception => {
+                                                    console.log(exception);
+                                                    res.writeHead(400);
+                                                    res.end(JSON.stringify({ error: exception }));
+                                                })
+                                            }).catch(exception => {
+                                                console.log(exception);
+                                                res.writeHead(400);
+                                                res.end(JSON.stringify({ error: exception }));
+                                            })
+                                        } else conn.query('UPDATE books SET title=?, author=?, isbn=?, description=? WHERE uuid=?',
+                                            [book.title, book.author, book.isbn, book.description, uuid]
+                                        ).then(() => {
+                                            broadcastUpdate();
+                                            res.writeHead(200);
+                                            res.end();
+                                            return;
+                                        })
+
+                                    }
                                 } else throw 'BOOK_DOES_NOT_EXIST';
                             }).catch(exception => {
                                 console.log(exception);
@@ -596,8 +585,8 @@ app.patch('/books/update*', function (req, res) {
                         } catch (ex) {
                             console.log(ex);
                         }
-                    }).catch(err => {
-
+                    }).catch(eex => {
+                        console.log(ex);
                     })
 
                 });
@@ -621,7 +610,6 @@ app.patch('/books/update*', function (req, res) {
     })
 
 })
-
 app.delete('/books/delete*', function (req, res) {
 
     let cookie = req.headers.cookie.slice(6);
@@ -648,12 +636,45 @@ app.delete('/books/delete*', function (req, res) {
                 try {
                     conn.query('SELECT * FROM books WHERE uuid=?', [uuid]).then(response => {
                         if (response.length == 1) {
-                            conn.query('DELETE FROM books WHERE uuid=?', [uuid]
-                            ).then(response => {
-                                broadcastUpdate()
-                                res.writeHead(200);
-                                res.end();
-                            })
+
+                            if (response[0].rentedby) {
+                                let rentedby = response[0].rentedby;
+                                conn.query('SELECT rented FROM users WHERE uuid=?', [rentedby]).then(response => {
+                                    if (response.length == 0) throw 'USER_NOT_FOUND';
+                                    console.log(response);
+                                    let rentedList = JSON.parse(response[0].rented);
+                                    console.log(rentedList);
+                                    for (let i = 0; i < rentedList.length; i++)
+                                        if (rentedList[i] == uuid)
+                                            rentedList.splice(i, 1);
+                                    console.log(rentedList);
+                                    conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(rentedList), decodedCookie.uuid]).then(() => {
+                                        conn.query('DELETE FROM books WHERE uuid=?', [uuid]
+                                        ).then(() => {
+                                            broadcastUpdate()
+                                            res.writeHead(200);
+                                            res.end();
+                                        }).catch(exception => {
+                                            console.log(exception);
+                                            res.writeHead(400);
+                                            res.end(JSON.stringify({ error: exception }));
+                                        })
+                                    })
+                                })
+
+
+
+                            } else
+                                conn.query('DELETE FROM books WHERE uuid=?', [uuid]
+                                ).then(response => {
+                                    broadcastUpdate()
+                                    res.writeHead(200);
+                                    res.end();
+                                }).catch(exception => {
+                                    console.log(exception);
+                                    res.writeHead(400);
+                                    res.end(JSON.stringify({ error: exception }));
+                                })
                         } else throw 'BOOK_DOES_NOT_EXIST';
                     }).catch(exception => {
                         console.log(exception);
@@ -685,8 +706,8 @@ app.delete('/books/delete*', function (req, res) {
 
 
 })
-
 app.get('/books/search*', function (req, res) {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
     let cookie = req.headers.cookie.slice(6);
     console.log(cookie);
     let search = '%' + new URL('https://library.karol.gay' + req.url).searchParams.get('query') + '%';
@@ -703,13 +724,318 @@ app.get('/books/search*', function (req, res) {
             res.end(JSON.stringify({ error: ex }));
             return;
         }
+        let isUserAdmin = decodedCookie.admin === true;
         let pool = mariadb.createPool(databaseCredential);
         pool.getConnection().then(conn => {
             conn.query('USE ' + databaseCredential.database).then(() => {
                 conn.query('SELECT * FROM books WHERE CONCAT(title, author, isbn, description) LIKE ? ORDER BY title', [search]).then(response => {
                     console.log(response);
                     let booksList = [];
-                    for (let i = 0; i < response.length; i++)booksList.push(response[i]);
+                    for (let i = 0; i < response.length; i++) {
+                        response[i].availableToRent = response[i].rentedby == null;
+                        response[i].rentedByYou = response[i].rentedby == decodedCookie.uuid;
+                        if (!isUserAdmin) delete response[i].rentedby;
+
+
+                        booksList.push(response[i]);
+                    }
+                    res.writeHead(200);
+                    res.end(JSON.stringify(booksList));
+                }).catch(ex => {
+                    console.log(ex);
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: ex }));
+                    return;
+
+                });
+
+            }).catch(ex => {
+                console.log(ex);
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: ex }));
+                return;
+            })
+
+        });
+
+
+
+        console.log(decodedCookie);
+
+    } catch (ex) {
+        console.log(ex);
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: ex }));
+        return;
+    }
+
+
+
+
+
+})
+app.get('/redirect*', function (req, res) {
+    let id = new URL('https://library.karol.gay' + req.url).searchParams.get('id');
+    console.log(id);
+    let pool = mariadb.createPool(databaseCredential);
+    pool.getConnection().then(conn => {
+        conn.query('USE ' + databaseCredential.database).then(() => {
+
+            conn.query('SELECT url FROM redirect WHERE id=?', [id]).then(response => {
+                console.log(response);
+                if (response.length == 0) {
+                    res.redirect('https://library.karol.gay/');
+                    res.end();
+                }
+                else {
+
+                    let url = response[0].url;
+                    console.log(url);
+                    res.redirect(url);
+                    res.end();
+                }
+
+
+            })
+        })
+
+    });
+
+});
+app.get('/users/get*', function (req, res) {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    try {
+        let cookie = req.headers.cookie.slice(6);
+        try {
+
+            let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'RS256' });
+            try {
+
+                if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
+                if (decodedCookie.exp < Date.now()) throw 'COOKIE_EXPIRED';
+                if (decodedCookie.admin !== true) throw 'USER_NOT_ADMIN';
+            }
+            catch (ex) {
+                console.log(ex);
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: ex }));
+                return;
+            }
+            let pool = mariadb.createPool(databaseCredential);
+            pool.getConnection().then(conn => {
+                conn.query('USE ' + databaseCredential.database).then(() => {
+                    try {
+                        conn.query('SELECT uuid, name, email, rented FROM users').then(response => {
+                            let userList = [];
+                            for (let i = 0; i < response.length; i++)userList.push({
+                                uuid: response[i].uuid,
+                                name: response[i].name,
+                                email: response[i].email,
+                                rented: JSON.parse(response[i].rented)
+                            });
+                            res.writeHead(200);
+                            res.end(JSON.stringify(userList));
+                        }).catch(exception => {
+                            console.log(exception);
+                            res.writeHead(400);
+                            res.end(JSON.stringify({ error: exception }));
+                        })
+
+                    } catch (ex) {
+                        console.log(ex);
+                    }
+                }).catch(err => {
+
+                })
+
+            });
+
+
+
+            console.log(decodedCookie);
+
+        } catch (ex) {
+            console.log(ex);
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: ex }));
+            return;
+        }
+    } catch (ex) {
+        console.log(ex);
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: ex }));
+        return;
+    }
+
+
+
+});
+app.post('/rental/rent*', function (req, res) {
+    let cookie = req.headers.cookie.slice(6);
+    console.log(cookie);
+    let uuid = req.url.substring(13, 49);
+    console.log(uuid);
+    try {
+        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'RS256' });
+        try {
+            if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
+            if (decodedCookie.exp < Date.now()) throw 'COOKIE_EXPIRED';
+        }
+        catch (ex) {
+            console.log(ex);
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: ex }));
+            return;
+        }
+        let pool = mariadb.createPool(databaseCredential);
+        pool.getConnection().then(conn => {
+            conn.query('USE ' + databaseCredential.database).then(() => {
+                conn.query('SELECT rentedby FROM books WHERE uuid=?', [uuid]).then(response => {
+                    if (response.length == 0) throw 'BOOK_NOT_FOUND';
+                    if (response[0].rentedby == null) {
+                        //rent a book;
+                        conn.query('UPDATE books SET rentedby=? WHERE uuid=?', [decodedCookie.uuid, uuid]).then(() => {
+                            conn.query('SELECT rented FROM users WHERE uuid=?', [decodedCookie.uuid]).then(response => {
+                                if (response.length == 0) throw 'USER_NOT_FOUND';
+                                console.log(response);
+                                let rentedList = JSON.parse(response[0].rented);
+                                console.log(rentedList);
+                                rentedList.push(uuid);
+                                console.log(rentedList);
+                                conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(rentedList), decodedCookie.uuid]).then(response => {
+                                    console.log(response);
+                                    broadcastUpdate();
+                                    res.writeHead(200);
+                                    res.end();
+                                })
+                            })
+                        })
+
+                    } else if (response[0].rentedby == decodedCookie.uuid) throw 'BOOK_RENTED_BY_YOU'; else throw 'BOOK_RENTED_BY_ANOTHER_USER';
+
+                }).catch(ex => {
+                    console.log(ex);
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: ex }));
+                    return;
+
+                });
+            }).catch(err => {
+                console.log(ex);
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: ex }));
+                return;
+            })
+
+        });
+    } catch (ex) {
+        console.log(ex);
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: ex }));
+        return;
+    }
+
+})
+app.post('/rental/return*', function (req, res) {
+    let cookie = req.headers.cookie.slice(6);
+    console.log(cookie);
+    let uuid = req.url.substring(15, 51);
+    console.log(uuid);
+    console.log(uuid);
+    try {
+        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'RS256' });
+        try {
+            if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
+            if (decodedCookie.exp < Date.now()) throw 'COOKIE_EXPIRED';
+        }
+        catch (ex) {
+            console.log(ex);
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: ex }));
+            return;
+        }
+        let pool = mariadb.createPool(databaseCredential);
+        pool.getConnection().then(conn => {
+            conn.query('USE ' + databaseCredential.database).then(() => {
+                conn.query('SELECT rentedby FROM books WHERE uuid=?', [uuid]).then(response => {
+                    console.log(response);
+                    if (response.length == 0) throw 'BOOK_NOT_FOUND';
+                    if (response[0].rentedby == decodedCookie.uuid) {
+                        //return a book;
+                        conn.query('UPDATE books SET rentedby=null WHERE uuid=?', [uuid]).then(() => {
+                            conn.query('SELECT rented FROM users WHERE uuid=?', [decodedCookie.uuid]).then(response => {
+                                if (response.length == 0) throw 'USER_NOT_FOUND';
+                                console.log(response);
+                                let rentedList = JSON.parse(response[0].rented);
+                                console.log(rentedList);
+                                for (let i = 0; i < rentedList.length; i++)
+                                    if (rentedList[i] == uuid)
+                                        rentedList.splice(i, 1);
+                                console.log(rentedList);
+                                conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(rentedList), decodedCookie.uuid]).then(response => {
+                                    console.log(response);
+                                    broadcastUpdate();
+                                    res.writeHead(200);
+                                    res.end();
+                                })
+                            })
+                        })
+
+                    } else if (response[0].rentedby == null) throw 'BOOK_NOT_RENTED'; else throw 'BOOK_RENTED_BY_ANOTHER_USER';
+
+                }).catch(ex => {
+                    console.log(ex);
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: ex }));
+                    return;
+
+                });
+            }).catch(err => {
+                console.log(ex);
+                res.writeHead(400);
+                res.end(JSON.stringify({ error: ex }));
+                return;
+            })
+
+        });
+    } catch (ex) {
+        console.log(ex);
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: ex }));
+        return;
+    }
+
+
+})
+app.get('/rental/get', function (req, res) {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    let cookie = req.headers.cookie.slice(6);
+    console.log(cookie);
+    try {
+        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'RS256' });
+        try {
+            if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
+            if (decodedCookie.exp < Date.now()) throw 'COOKIE_EXPIRED';
+        }
+        catch (ex) {
+            console.log(ex);
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: ex }));
+            return;
+        }
+        let isUserAdmin = decodedCookie.admin === true;
+        let pool = mariadb.createPool(databaseCredential);
+        pool.getConnection().then(conn => {
+            conn.query('USE ' + databaseCredential.database).then(() => {
+                conn.query('SELECT * FROM books WHERE rentedby=?', [decodedCookie.uuid]).then(response => {
+                    console.log(response);
+                    let booksList = [];
+                    for (let i = 0; i < response.length; i++) {
+                        if (!isUserAdmin) delete response[i].rentedby;
+
+
+                        booksList.push(response[i]);
+                    }
                     console.log(booksList);
                     res.writeHead(200);
                     res.end(JSON.stringify(booksList));
@@ -746,16 +1072,6 @@ app.get('/books/search*', function (req, res) {
 
 
 })
-
-
-let updatesClientsList = [];
-
-function broadcastUpdate() {
-    updatesClientsList.forEach(element => {
-        element.send('UPDATE')
-    });
-}
-const wssUpdates = new webSocket.Server({ port: updatesPort });
 wssUpdates.on("connection", ws => {
     updatesClientsList.push(ws);
     console.log('Updates connected:', updatesClientsList.length);
@@ -768,3 +1084,163 @@ wssUpdates.on("connection", ws => {
         }
     })
 });
+
+function validateEmail(email) {
+    return String(email)
+        .toLowerCase()
+        .match(
+            /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/
+        );
+};
+function createAccount(mail) {
+    let pool = mariadb.createPool(databaseCredential);
+    pool.getConnection().then(conn => {
+        conn.query('USE ' + databaseCredential.database).then(() => {
+            let uuid = getUuid(mail);
+            conn.query("INSERT INTO users (uuid, admin, email) VALUES (?, ?, ?)", [uuid, false, mail]).then(res => {
+                console.log(res);
+                broadcastUpdate();
+            }).catch(err => {
+                console.log(err);
+            })
+            sendKeyRegistrationMail(mail);
+        }).catch(err => {
+            console.log(err);
+        })
+
+    });
+}
+async function sendKeyRegistrationMail(mail) {
+
+    let pool = mariadb.createPool(databaseCredential);
+    pool.getConnection().then(conn => {
+        conn.query('USE ' + databaseCredential.database).then(() => {
+            conn.query("SELECT * FROM users WHERE email=?", [mail]).then(async res => {
+
+                let user = res[0];
+                console.log(user);
+                var nonce = "";
+                const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+                for (var i = 0; i < 64; i++)
+                    nonce += possible.charAt(Math.floor(Math.random() * possible.length));
+
+                const claims = {
+                    iss: "library.karol.gay",
+                    kind: "key-reset",
+
+                    nonce: nonce,
+
+                    iat: Date.now(),
+                    exp: Date.now() + 900000,
+
+                    name: user.name | user.email,
+                    mail: user.email,
+                    uuid: user.uuid,
+                    admin: user.admin == 1
+
+                }
+                const token = jwt.sign(claims, privkey, { algorithm: 'RS256' });
+                const url = createRedirect('https://library.karol.gay/keyreset.html?token=' + token);
+
+                let transporter = nodemailer.createTransport({
+                    host: "in-v3.mailjet.com",
+                    port: 587,
+                    secure: false,
+                    auth: require('./smtp.json')
+                });
+
+                let message = {
+                    from: '"Library 📖" <library@karol.gay>',
+                    to: claims.mail,
+                    subject: 'Register new device with your account',
+                    text: 'Click this link to register a new device with your Library account. This link is only valid for 15 minutes. Note that your old device will get deauthorized.\n\n' + url,
+                    html: 'Click this link to register a new device with your Library account. This link is only valid for 15 minutes. Note that your old device will get deauthorized.\n\n' + url,
+                    attachments: []
+                };
+
+                try {
+                    await transporter.sendMail(message);
+
+                } catch (ex) {
+
+                }
+
+            }).catch(err => {
+                console.log(err);
+            })
+
+        }).catch(err => {
+            console.log(err);
+        })
+
+    });
+
+
+
+
+
+
+
+
+
+
+}
+function decodeAuthData(authData) {
+    let FLAG_UP = 0x01; // Flag for userPresence
+    let FLAG_UV = 0x04; // Flag for userVerification
+    let FLAG_AT = 0x40; // Flag for attestedCredentialData
+    let FLAG_ED = 0x80; // Flag for extensions
+
+    let rpIdHash = authData.slice(0, 32);
+    let flags = authData.slice(32, 33)[0];
+    let signCount = authData.slice(33, 37);
+
+    if ((flags & FLAG_AT) === 0x00) {
+        // no attestedCredentialData
+        return {
+            rpIdHash: rpIdHash,
+            flags: flags,
+            signCount: signCount
+        }
+    }
+
+    if (authData.length < 38) {
+        // attestedCredentialData missing
+        throw 'invalid authData.length';
+    }
+
+    let aaguid = authData.slice(37, 53);
+    let credentialIdLength = (authData[53] << 8) + authData[54]; //16-bit unsigned big-endian integer
+    let credenitalId = authData.slice(55, 55 + credentialIdLength);
+    let credentialPublicKey = this.decodeCredentialPublicKey(authData.slice(55 + credentialIdLength));
+
+    /* decoding extensions - not implemented */
+
+    return {
+        rpIdHash: rpIdHash,
+        flags: flags,
+        signCount: signCount,
+        attestedCredentialData: {
+            aaguid: aaguid,
+            credentialId: credenitalId,
+            credentialPublicKey: credentialPublicKey
+        }
+    }
+}
+function createRedirect(url) {
+    let id = crypto.createHash('sha256').update(url).digest('hex');
+    let pool = mariadb.createPool(databaseCredential);
+    pool.getConnection().then(conn => {
+        conn.query('USE ' + databaseCredential.database).then(() => {
+
+            conn.query('INSERT INTO redirect (id, url) VALUES (?, ?)', [id, url]);
+        })
+
+    });
+    return 'https://library.karol.gay/redirect?id=' + id;
+}
+function broadcastUpdate() {
+    updatesClientsList.forEach(element => {
+        element.send('UPDATE')
+    });
+}
