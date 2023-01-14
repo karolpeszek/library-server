@@ -56,17 +56,20 @@ app.post('/registerKey', function (req, response) {
                             conn.query("UPDATE users SET name=?, pubkey=?, keyid=?, nonce=? WHERE uuid=?", [registrationObject.userName, registrationObject.publicKey, registrationObject.keyId, decodedResetToken.iat, decodedResetToken.uuid]).then(res => {
                                 response.writeHead(200);
                                 response.end();
+                                conn.close(); pool.end();
                             })
                         }
                         else {
                             console.log('TOKEN_TOO_OLD');
                             response.writeHead(400);
+                            conn.close(); pool.end();
                             response.end('ERROR_TOKEN_TOO_OLD');
                         }
                     })
                 }).catch(err => {
                     console.log(err);
                     response.writeHead(400);
+                    conn.close(); pool.end();
                     response.end('ERROR_VALIDATING_DATA');
                 })
 
@@ -131,119 +134,126 @@ wssLogin.on("connection", ws => {
     ws.send(JSON.stringify({ kind: 'challange', challange: nonce }))
 
     ws.on("message", message => {
-        let assertionObject = JSON.parse(new TextDecoder().decode(message));
+        try {
+            let assertionObject = JSON.parse(new TextDecoder().decode(message));
 
-        let pool = mariadb.createPool(databaseCredential);
-        pool.getConnection().then(conn => {
-            conn.query('USE ' + databaseCredential.database).then(() => {
-                conn.query("SELECT * FROM users WHERE keyid=?", [assertionObject.keyId]).then(async res => {
-                    function fromUTF8String(utf8String) {
-                        const encoder = new globalThis.TextEncoder();
-                        return encoder.encode(utf8String);
-                    }
-
-                    async function digest(data, _algorithm) {
-                        const hashed = await crypto.webcrypto.subtle.digest('SHA-256', data);
-
-                        return new Uint8Array(hashed);
-                    }
-
-                    async function toHash(data, algorithm = -7) {
-                        if (typeof data === 'string') {
-                            data = fromUTF8String(data);
+            let pool = mariadb.createPool(databaseCredential);
+            pool.getConnection().then(conn => {
+                conn.query('USE ' + databaseCredential.database).then(() => {
+                    conn.query("SELECT * FROM users WHERE keyid=?", [assertionObject.keyId]).then(async res => {
+                        function fromUTF8String(utf8String) {
+                            const encoder = new globalThis.TextEncoder();
+                            return encoder.encode(utf8String);
                         }
 
-                        return digest(data, algorithm);
-                    }
-                    function concat(arrays) {
-                        let pointer = 0;
-                        const totalLength = arrays.reduce((prev, curr) => prev + curr.length, 0);
+                        async function digest(data, _algorithm) {
+                            const hashed = await crypto.webcrypto.subtle.digest('SHA-256', data);
 
-                        const toReturn = new Uint8Array(totalLength);
-
-                        arrays.forEach((arr) => {
-                            toReturn.set(arr, pointer);
-                            pointer += arr.length;
-                        });
-
-                        return toReturn;
-                    }
-                    let user = res[0];
-                    console.log(user);
-                    console.log(assertionObject);
-                    var Ecdsa = ellipticcurve.Ecdsa;
-                    var Signature = ellipticcurve.Signature;
-                    var PublicKey = ellipticcurve.PublicKey;
-
-                    let decodedAuthData = decodeAuthData(assertionObject.authData.replaceAll('=', ''));
-                    let decodedUserData = JSON.parse(atob(assertionObject.clientData));
-                    let publicKey = PublicKey.fromPem(user.pubkey);
-                    let signature = Signature.fromDer(atob(assertionObject.signature));
-                    let authDataBuffer = base64url.toBuffer(assertionObject.authData);
-                    const clientDataHash = await toHash(base64url.toBuffer(assertionObject.clientData));
-
-                    const signatureBase = concat([authDataBuffer, clientDataHash]);
-
-                    console.log(decodedUserData);
-                    console.log(decodedAuthData);
-                    let signedCorrectly = Ecdsa.verify(signatureBase, signature, publicKey);
-                    let nonceMatch = decodedUserData.challenge == btoa(nonce).replace('==', '');
-                    let rpidMatch = decodedAuthData.rpIdHash == 'g0Wwcdu/y9I4JMxQaL9PcnCQSwMAhazy';
-                    let ceremonyMatch = decodedUserData.type == 'webauthn.get';
-                    let originMatch = decodedUserData.origin == 'https://library.karol.gay';
-
-                    console.log('Signed correcly', signedCorrectly);
-                    console.log('Nonce match', nonceMatch);
-                    console.log('RPID Match', rpidMatch);
-                    console.log('Ceremony Match', ceremonyMatch);
-                    console.log('Origin match', originMatch);
-                    if (signedCorrectly &&
-                        rpidMatch &&
-                        nonceMatch &&
-                        ceremonyMatch &&
-                        originMatch
-                    ) {
-                        console.log('user verified!');
-                        const trustTokenObject = {
-                            iss: 'library.karol.gay',
-                            kind: 'trust-cookie',
-                            nonce: nonce,
-                            iat: Date.now(),
-                            exp: Date.now() + 86400000, //24h
-                            name: user.name,
-                            mail: user.mail,
-                            uuid: user.uuid,
-                            admin: user.admin == 1
+                            return new Uint8Array(hashed);
                         }
-                        const token = jwt.sign(trustTokenObject, privkey, { algorithm: 'RS256' });
-                        const cookie = JSON.stringify({ kind: 'cookie', cookie: token });
-                        console.log(cookie);
-                        ws.send(cookie);
-                        ws.close();
 
+                        async function toHash(data, algorithm = -7) {
+                            if (typeof data === 'string') {
+                                data = fromUTF8String(data);
+                            }
 
-                    }
-                    else {
-                        let authenticationFailer = {
-                            signedCorrectly: signedCorrectly,
-                            nonceMatch: nonceMatch,
-                            rpidHashMatch: rpidMatch,
-                            ceremonyTypeMatch: ceremonyMatch,
-                            originMatch: originMatch
+                            return digest(data, algorithm);
                         }
-                        ws.send(JSON.stringify({ kind: 'authentication-failure', reason: authenticationFailer }));
-                        ws.close();
-                    }
+                        function concat(arrays) {
+                            let pointer = 0;
+                            const totalLength = arrays.reduce((prev, curr) => prev + curr.length, 0);
 
+                            const toReturn = new Uint8Array(totalLength);
+
+                            arrays.forEach((arr) => {
+                                toReturn.set(arr, pointer);
+                                pointer += arr.length;
+                            });
+
+                            return toReturn;
+                        }
+                        let user = res[0];
+                        console.log(user);
+                        console.log(assertionObject);
+                        var Ecdsa = ellipticcurve.Ecdsa;
+                        var Signature = ellipticcurve.Signature;
+                        var PublicKey = ellipticcurve.PublicKey;
+
+                        let decodedAuthData = decodeAuthData(assertionObject.authData.replaceAll('=', ''));
+                        let decodedUserData = JSON.parse(atob(assertionObject.clientData));
+                        let publicKey = PublicKey.fromPem(user.pubkey);
+                        let signature = Signature.fromDer(atob(assertionObject.signature));
+                        let authDataBuffer = base64url.toBuffer(assertionObject.authData);
+                        const clientDataHash = await toHash(base64url.toBuffer(assertionObject.clientData));
+
+                        const signatureBase = concat([authDataBuffer, clientDataHash]);
+
+                        console.log(decodedUserData);
+                        console.log(decodedAuthData);
+                        let signedCorrectly = Ecdsa.verify(signatureBase, signature, publicKey);
+                        let nonceMatch = decodedUserData.challenge == btoa(nonce).replace('==', '');
+                        let rpidMatch = decodedAuthData.rpIdHash == 'g0Wwcdu/y9I4JMxQaL9PcnCQSwMAhazy';
+                        let ceremonyMatch = decodedUserData.type == 'webauthn.get';
+                        let originMatch = decodedUserData.origin == 'https://library.karol.gay';
+
+                        console.log('Signed correcly', signedCorrectly);
+                        console.log('Nonce match', nonceMatch);
+                        console.log('RPID Match', rpidMatch);
+                        console.log('Ceremony Match', ceremonyMatch);
+                        console.log('Origin match', originMatch);
+                        if (signedCorrectly &&
+                            rpidMatch &&
+                            nonceMatch &&
+                            ceremonyMatch &&
+                            originMatch
+                        ) {
+                            console.log('user verified!');
+                            const trustTokenObject = {
+                                iss: 'library.karol.gay',
+                                kind: 'trust-cookie',
+                                nonce: nonce,
+                                iat: Date.now(),
+                                exp: Date.now() + 86400000, //24h
+                                name: user.name,
+                                mail: user.mail,
+                                uuid: user.uuid,
+                                admin: user.admin == 1
+                            }
+                            const token = jwt.sign(trustTokenObject, privkey, { algorithm: 'RS256' });
+                            const cookie = JSON.stringify({ kind: 'cookie', cookie: token });
+                            console.log(cookie);
+                            ws.send(cookie);
+                            ws.close();
+
+
+                        }
+                        else {
+                            let authenticationFailure = {
+                                signedCorrectly: signedCorrectly,
+                                nonceMatch: nonceMatch,
+                                rpidHashMatch: rpidMatch,
+                                ceremonyTypeMatch: ceremonyMatch,
+                                originMatch: originMatch
+                            }
+                            ws.send(JSON.stringify({ kind: 'authentication-failure', reason: authenticationFailure }));
+                            ws.close();
+                        }
+
+
+                    }).catch(err => {
+                        console.log(err);
+                    })
 
                 }).catch(err => {
                     console.log(err);
                 })
-
-            }).catch(err => {
-                console.log(err);
-            })
-        });
+            });
+        } catch (exception) {
+            console.log(exception);
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: exception }));
+            return;
+        }
     });
 
 
@@ -271,6 +281,7 @@ app.get('/books/get*', function (req, res) {
         let isUserAdmin = decodedCookie.admin === true;
         pool.getConnection().then(conn => {
             conn.query('USE ' + databaseCredential.database).then(() => {
+
                 if (uuid)
                     conn.query('SELECT * FROM books WHERE uuid=?', [uuid]).then(response => {
                         if (response.length == 1) {
@@ -278,6 +289,7 @@ app.get('/books/get*', function (req, res) {
                             response[0].rentedByYou = response[0].rentedby == decodedCookie.uuid;
                             if (!isUserAdmin) delete response[0].rentedby;
                             res.writeHead(200);
+                            conn.close(); pool.end();
                             res.end(JSON.stringify(response[0]));
                             return;
                         } else throw 'BOOK_DOES_NOT_EXIST';
@@ -285,6 +297,7 @@ app.get('/books/get*', function (req, res) {
                     }).catch(ex => {
                         console.log(ex);
                         res.writeHead(400);
+                        conn.close(); pool.end();
                         res.end(JSON.stringify({ error: ex }));
                         return;
 
@@ -299,11 +312,13 @@ app.get('/books/get*', function (req, res) {
                             booksList.push(response[i]);
                         }
                         res.writeHead(200);
+                        conn.close(); pool.end();
                         res.end(JSON.stringify(booksList));
                     });
             }).catch(err => {
                 console.log(ex);
                 res.writeHead(400);
+                conn.close(); pool.end();
                 res.end(JSON.stringify({ error: ex }));
                 return;
             })
@@ -371,22 +386,26 @@ app.post('/books/add', function (req, res) {
                                                 conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(list), book.rentedby]).then(() => {
                                                     broadcastUpdate()
                                                     res.writeHead(200);
+                                                    conn.close(); pool.end();
                                                     res.end();
                                                 }).catch(exception => {
                                                     console.log(exception);
                                                     res.writeHead(400);
+                                                    conn.close(); pool.end();
                                                     res.end(JSON.stringify({ error: exception }));
                                                 })
 
                                             }).catch(exception => {
                                                 console.log(exception);
                                                 res.writeHead(400);
+                                                conn.close(); pool.end();
                                                 res.end(JSON.stringify({ error: exception }));
                                             })
                                         } else throw 'BOOK_ALREADY_EXISTS';
                                     }).catch(exception => {
                                         console.log(exception);
                                         res.writeHead(400);
+                                        conn.close(); pool.end();
                                         res.end(JSON.stringify({ error: exception }));
                                     })
 
@@ -396,6 +415,7 @@ app.post('/books/add', function (req, res) {
                             }).catch(exception => {
                                 console.log(exception);
                                 res.writeHead(400);
+                                conn.close(); pool.end();
                                 res.end(JSON.stringify({ error: exception }));
                             })
 
@@ -409,12 +429,14 @@ app.post('/books/add', function (req, res) {
                                         ).then(response => {
                                             broadcastUpdate()
                                             res.writeHead(200);
+                                            conn.close(); pool.end();
                                             res.end();
                                         })
                                     } else throw 'BOOK_ALREADY_EXISTS';
                                 }).catch(exception => {
                                     console.log(exception);
                                     res.writeHead(400);
+                                    conn.close(); pool.end();
                                     res.end(JSON.stringify({ error: exception }));
                                 })
 
@@ -502,11 +524,13 @@ app.patch('/books/update*', function (req, res) {
                                                     conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(rentedList), oldBook.rentedby]).catch(exception => {
                                                         console.log(exception);
                                                         res.writeHead(400);
+                                                        conn.close(); pool.end();
                                                         res.end(JSON.stringify({ error: exception }));
                                                     })
                                                 }).catch(exception => {
                                                     console.log(exception);
                                                     res.writeHead(400);
+                                                    conn.close(); pool.end();
                                                     res.end(JSON.stringify({ error: exception }));
                                                 })
                                             }
@@ -520,6 +544,7 @@ app.patch('/books/update*', function (req, res) {
                                                         ).then(() => {
                                                             broadcastUpdate();
                                                             res.writeHead(200);
+                                                            conn.close(); pool.end();
                                                             res.end();
                                                             return;
                                                         })
@@ -533,6 +558,7 @@ app.patch('/books/update*', function (req, res) {
                                         }).catch(exception => {
                                             console.log(exception);
                                             res.writeHead(400);
+                                            conn.close(); pool.end();
                                             res.end(JSON.stringify({ error: exception }));
                                         })
                                     else {
@@ -552,17 +578,20 @@ app.patch('/books/update*', function (req, res) {
                                                     ).then(() => {
                                                         broadcastUpdate();
                                                         res.writeHead(200);
+                                                        conn.close(); pool.end();
                                                         res.end();
                                                         return;
                                                     })
                                                 }).catch(exception => {
                                                     console.log(exception);
                                                     res.writeHead(400);
+                                                    conn.close(); pool.end();
                                                     res.end(JSON.stringify({ error: exception }));
                                                 })
                                             }).catch(exception => {
                                                 console.log(exception);
                                                 res.writeHead(400);
+                                                conn.close(); pool.end();
                                                 res.end(JSON.stringify({ error: exception }));
                                             })
                                         } else conn.query('UPDATE books SET title=?, author=?, isbn=?, description=? WHERE uuid=?',
@@ -570,6 +599,7 @@ app.patch('/books/update*', function (req, res) {
                                         ).then(() => {
                                             broadcastUpdate();
                                             res.writeHead(200);
+                                            conn.close(); pool.end();
                                             res.end();
                                             return;
                                         })
@@ -579,6 +609,7 @@ app.patch('/books/update*', function (req, res) {
                             }).catch(exception => {
                                 console.log(exception);
                                 res.writeHead(400);
+                                conn.close(); pool.end();
                                 res.end(JSON.stringify({ error: exception }));
                             })
 
@@ -653,10 +684,13 @@ app.delete('/books/delete*', function (req, res) {
                                         ).then(() => {
                                             broadcastUpdate()
                                             res.writeHead(200);
+                                            conn.close(); pool.end();
                                             res.end();
                                         }).catch(exception => {
                                             console.log(exception);
+                                            conn.close(); pool.end();
                                             res.writeHead(400);
+                                            conn.close(); pool.end();
                                             res.end(JSON.stringify({ error: exception }));
                                         })
                                     })
@@ -669,9 +703,11 @@ app.delete('/books/delete*', function (req, res) {
                                 ).then(response => {
                                     broadcastUpdate()
                                     res.writeHead(200);
+                                    conn.close(); pool.end();
                                     res.end();
                                 }).catch(exception => {
                                     console.log(exception);
+                                    conn.close(); pool.end();
                                     res.writeHead(400);
                                     res.end(JSON.stringify({ error: exception }));
                                 })
@@ -679,6 +715,7 @@ app.delete('/books/delete*', function (req, res) {
                     }).catch(exception => {
                         console.log(exception);
                         res.writeHead(400);
+                        conn.close(); pool.end();
                         res.end(JSON.stringify({ error: exception }));
                     })
 
@@ -740,10 +777,12 @@ app.get('/books/search*', function (req, res) {
                         booksList.push(response[i]);
                     }
                     res.writeHead(200);
+                    conn.close(); pool.end();
                     res.end(JSON.stringify(booksList));
                 }).catch(ex => {
                     console.log(ex);
                     res.writeHead(400);
+                    conn.close(); pool.end();
                     res.end(JSON.stringify({ error: ex }));
                     return;
 
@@ -752,6 +791,7 @@ app.get('/books/search*', function (req, res) {
             }).catch(ex => {
                 console.log(ex);
                 res.writeHead(400);
+                conn.close(); pool.end();
                 res.end(JSON.stringify({ error: ex }));
                 return;
             })
@@ -785,6 +825,7 @@ app.get('/redirect*', function (req, res) {
                 console.log(response);
                 if (response.length == 0) {
                     res.redirect('https://library.karol.gay/');
+                    conn.close(); pool.end();
                     res.end();
                 }
                 else {
@@ -792,6 +833,7 @@ app.get('/redirect*', function (req, res) {
                     let url = response[0].url;
                     console.log(url);
                     res.redirect(url);
+                    conn.close(); pool.end();
                     res.end();
                 }
 
@@ -834,10 +876,12 @@ app.get('/users/get*', function (req, res) {
                                 rented: JSON.parse(response[i].rented)
                             });
                             res.writeHead(200);
+                            conn.close(); pool.end();
                             res.end(JSON.stringify(userList));
                         }).catch(exception => {
                             console.log(exception);
                             res.writeHead(400);
+                            conn.close(); pool.end();
                             res.end(JSON.stringify({ error: exception }));
                         })
 
@@ -906,6 +950,7 @@ app.post('/rental/rent*', function (req, res) {
                                     console.log(response);
                                     broadcastUpdate();
                                     res.writeHead(200);
+                                    conn.close(); pool.end();
                                     res.end();
                                 })
                             })
@@ -916,6 +961,7 @@ app.post('/rental/rent*', function (req, res) {
                 }).catch(ex => {
                     console.log(ex);
                     res.writeHead(400);
+                    conn.close(); pool.end();
                     res.end(JSON.stringify({ error: ex }));
                     return;
 
@@ -923,6 +969,7 @@ app.post('/rental/rent*', function (req, res) {
             }).catch(err => {
                 console.log(ex);
                 res.writeHead(400);
+                conn.close(); pool.end();
                 res.end(JSON.stringify({ error: ex }));
                 return;
             })
@@ -976,6 +1023,7 @@ app.post('/rental/return*', function (req, res) {
                                     console.log(response);
                                     broadcastUpdate();
                                     res.writeHead(200);
+                                    conn.close(); pool.end();
                                     res.end();
                                 })
                             })
@@ -986,6 +1034,7 @@ app.post('/rental/return*', function (req, res) {
                 }).catch(ex => {
                     console.log(ex);
                     res.writeHead(400);
+                    conn.close(); pool.end();
                     res.end(JSON.stringify({ error: ex }));
                     return;
 
@@ -993,6 +1042,7 @@ app.post('/rental/return*', function (req, res) {
             }).catch(err => {
                 console.log(ex);
                 res.writeHead(400);
+                conn.close(); pool.end();
                 res.end(JSON.stringify({ error: ex }));
                 return;
             })
@@ -1038,10 +1088,12 @@ app.get('/rental/get', function (req, res) {
                     }
                     console.log(booksList);
                     res.writeHead(200);
+                    conn.close(); pool.end();
                     res.end(JSON.stringify(booksList));
                 }).catch(ex => {
                     console.log(ex);
                     res.writeHead(400);
+                    conn.close(); pool.end();
                     res.end(JSON.stringify({ error: ex }));
                     return;
 
@@ -1050,6 +1102,7 @@ app.get('/rental/get', function (req, res) {
             }).catch(ex => {
                 console.log(ex);
                 res.writeHead(400);
+                conn.close(); pool.end();
                 res.end(JSON.stringify({ error: ex }));
                 return;
             })
@@ -1241,6 +1294,10 @@ function createRedirect(url) {
 }
 function broadcastUpdate() {
     updatesClientsList.forEach(element => {
-        element.send('UPDATE')
+        try {
+            element.send('UPDATE')
+        } catch (ex) {
+            console.log(ex);
+        }
     });
 }
