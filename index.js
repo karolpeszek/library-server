@@ -867,14 +867,17 @@ app.get('/users/get*', function (req, res) {
             pool.getConnection().then(conn => {
                 conn.query('USE ' + databaseCredential.database).then(() => {
                     try {
-                        conn.query('SELECT uuid, name, email, rented FROM users').then(response => {
+                        conn.query('SELECT uuid, name, admin, email, rented FROM users').then(response => {
                             let userList = [];
+                            console.log(response);
                             for (let i = 0; i < response.length; i++)userList.push({
                                 uuid: response[i].uuid,
                                 name: response[i].name,
                                 email: response[i].email,
+                                admin: response[i].admin == 1,
                                 rented: JSON.parse(response[i].rented)
                             });
+                            
                             res.writeHead(200);
                             conn.close(); pool.end();
                             res.end(JSON.stringify(userList));
