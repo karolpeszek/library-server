@@ -814,8 +814,8 @@ app.get('/books/search*', function (req, res) {
 
 
 })
-app.get('/redirect*', function (req, res) {
-    let id = new URL('https://library.karol.gay' + req.url).searchParams.get('id');
+app.get('/resetdevice*', function (req, res) {
+    let id = new URL('https://library.karol.gay' + req.url).searchParams.get('token');
     console.log(id);
     let pool = mariadb.createPool(databaseCredential);
     pool.getConnection().then(conn => {
@@ -877,7 +877,7 @@ app.get('/users/get*', function (req, res) {
                                 admin: response[i].admin == 1,
                                 rented: JSON.parse(response[i].rented)
                             });
-                            
+
                             res.writeHead(200);
                             conn.close(); pool.end();
                             res.end(JSON.stringify(userList));
@@ -1293,7 +1293,7 @@ function createRedirect(url) {
         })
 
     });
-    return 'https://library.karol.gay/redirect?id=' + id;
+    return 'https://library.karol.gay/resetdevice?token=' + id;
 }
 function broadcastUpdate() {
     updatesClientsList.forEach(element => {
