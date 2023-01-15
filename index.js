@@ -23,7 +23,7 @@ const databaseCredential = require(__dirname + '/sql.json')
 const wssLogin = new webSocket.Server({ port: loginPort })
 const wssUpdates = new webSocket.Server({ port: updatesPort });
 var server = http.createServer(app).listen(registerPort, function () {
-    console.log("Express server listening on port " + registerPort);
+    console.log('Started Library Service, listening on ports', loginPort, registerPort, updatesPort, '. It\'s', new Date(Date.now()).toString());
 });
 
 let updatesClientsList = [];
