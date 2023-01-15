@@ -224,7 +224,7 @@ wssLogin.on("connection", ws => {
 
                             ws.send(cookie);
                             ws.close();
-
+                            conn.release(); conn.close(); pool.end();
 
                         }
                         else {
@@ -237,22 +237,23 @@ wssLogin.on("connection", ws => {
                             }
                             ws.send(JSON.stringify({ kind: 'authentication-failure', reason: authenticationFailure }));
                             ws.close();
+                            conn.release(); conn.close(); pool.end();
                         }
 
 
                     }).catch(err => {
                         console.log(err);
+                        conn.release(); conn.close(); pool.end();
                     })
 
                 }).catch(err => {
                     console.log(err);
+                    conn.release(); conn.close(); pool.end();
                 })
             });
         } catch (exception) {
             console.log(exception);
-            res.writeHead(400);
-            res.end(JSON.stringify({ error: exception }));
-            return;
+            conn.release(); conn.close(); pool.end();
         }
     });
 
