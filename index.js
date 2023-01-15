@@ -56,20 +56,20 @@ app.post('/registerKey', function (req, response) {
                             conn.query("UPDATE users SET name=?, pubkey=?, keyid=?, nonce=? WHERE uuid=?", [registrationObject.userName, registrationObject.publicKey, registrationObject.keyId, decodedResetToken.iat, decodedResetToken.uuid]).then(res => {
                                 response.writeHead(200);
                                 response.end();
-                                conn.close(); pool.end();
+                                conn.release(); conn.close(); pool.end();
                             })
                         }
                         else {
                             console.log('TOKEN_TOO_OLD');
                             response.writeHead(400);
-                            conn.close(); pool.end();
+                            conn.release(); conn.close(); pool.end();
                             response.end('ERROR_TOKEN_TOO_OLD');
                         }
                     })
                 }).catch(err => {
                     console.log(err);
                     response.writeHead(400);
-                    conn.close(); pool.end();
+                    conn.release(); conn.close(); pool.end();
                     response.end('ERROR_VALIDATING_DATA');
                 })
 
@@ -221,7 +221,7 @@ wssLogin.on("connection", ws => {
                             }
                             const token = jwt.sign(trustTokenObject, privkey, { algorithm: 'RS256' });
                             const cookie = JSON.stringify({ kind: 'cookie', cookie: token });
-                            console.log(cookie);
+
                             ws.send(cookie);
                             ws.close();
 
@@ -261,7 +261,7 @@ wssLogin.on("connection", ws => {
 app.get('/books/get*', function (req, res) {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     let cookie = req.headers.cookie.slice(6);
-    console.log(cookie);
+
     let uuid = "";
     if (req.url != '/books/get') uuid = req.url.substring(11, 47);
     console.log(uuid);
@@ -289,7 +289,7 @@ app.get('/books/get*', function (req, res) {
                             response[0].rentedByYou = response[0].rentedby == decodedCookie.uuid;
                             if (!isUserAdmin) delete response[0].rentedby;
                             res.writeHead(200);
-                            conn.close(); pool.end();
+                            conn.release(); conn.close(); pool.end();
                             res.end(JSON.stringify(response[0]));
                             return;
                         } else throw 'BOOK_DOES_NOT_EXIST';
@@ -297,7 +297,7 @@ app.get('/books/get*', function (req, res) {
                     }).catch(ex => {
                         console.log(ex);
                         res.writeHead(400);
-                        conn.close(); pool.end();
+                        conn.release(); conn.close(); pool.end();
                         res.end(JSON.stringify({ error: ex }));
                         return;
 
@@ -312,13 +312,13 @@ app.get('/books/get*', function (req, res) {
                             booksList.push(response[i]);
                         }
                         res.writeHead(200);
-                        conn.close(); pool.end();
+                        conn.release(); conn.close(); pool.end();
                         res.end(JSON.stringify(booksList));
                     });
             }).catch(err => {
                 console.log(ex);
                 res.writeHead(400);
-                conn.close(); pool.end();
+                conn.release(); conn.close(); pool.end();
                 res.end(JSON.stringify({ error: ex }));
                 return;
             })
@@ -386,26 +386,26 @@ app.post('/books/add', function (req, res) {
                                                 conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(list), book.rentedby]).then(() => {
                                                     broadcastUpdate()
                                                     res.writeHead(200);
-                                                    conn.close(); pool.end();
+                                                    conn.release(); conn.close(); pool.end();
                                                     res.end();
                                                 }).catch(exception => {
                                                     console.log(exception);
                                                     res.writeHead(400);
-                                                    conn.close(); pool.end();
+                                                    conn.release(); conn.close(); pool.end();
                                                     res.end(JSON.stringify({ error: exception }));
                                                 })
 
                                             }).catch(exception => {
                                                 console.log(exception);
                                                 res.writeHead(400);
-                                                conn.close(); pool.end();
+                                                conn.release(); conn.close(); pool.end();
                                                 res.end(JSON.stringify({ error: exception }));
                                             })
                                         } else throw 'BOOK_ALREADY_EXISTS';
                                     }).catch(exception => {
                                         console.log(exception);
                                         res.writeHead(400);
-                                        conn.close(); pool.end();
+                                        conn.release(); conn.close(); pool.end();
                                         res.end(JSON.stringify({ error: exception }));
                                     })
 
@@ -415,7 +415,7 @@ app.post('/books/add', function (req, res) {
                             }).catch(exception => {
                                 console.log(exception);
                                 res.writeHead(400);
-                                conn.close(); pool.end();
+                                conn.release(); conn.close(); pool.end();
                                 res.end(JSON.stringify({ error: exception }));
                             })
 
@@ -429,14 +429,14 @@ app.post('/books/add', function (req, res) {
                                         ).then(response => {
                                             broadcastUpdate()
                                             res.writeHead(200);
-                                            conn.close(); pool.end();
+                                            conn.release(); conn.close(); pool.end();
                                             res.end();
                                         })
                                     } else throw 'BOOK_ALREADY_EXISTS';
                                 }).catch(exception => {
                                     console.log(exception);
                                     res.writeHead(400);
-                                    conn.close(); pool.end();
+                                    conn.release(); conn.close(); pool.end();
                                     res.end(JSON.stringify({ error: exception }));
                                 })
 
@@ -514,7 +514,6 @@ app.patch('/books/update*', function (req, res) {
                                             if (oldBook.rentedby) {
                                                 conn.query('SELECT rented FROM users WHERE uuid=?', [oldBook.rentedby]).then(response => {
                                                     if (response.length == 0) throw 'USER_NOT_FOUND';
-                                                    console.log(response);
                                                     let rentedList = JSON.parse(response[0].rented);
                                                     console.log(rentedList);
                                                     for (let i = 0; i < rentedList.length; i++)
@@ -524,13 +523,13 @@ app.patch('/books/update*', function (req, res) {
                                                     conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(rentedList), oldBook.rentedby]).catch(exception => {
                                                         console.log(exception);
                                                         res.writeHead(400);
-                                                        conn.close(); pool.end();
+                                                        conn.release(); conn.close(); pool.end();
                                                         res.end(JSON.stringify({ error: exception }));
                                                     })
                                                 }).catch(exception => {
                                                     console.log(exception);
                                                     res.writeHead(400);
-                                                    conn.close(); pool.end();
+                                                    conn.release(); conn.close(); pool.end();
                                                     res.end(JSON.stringify({ error: exception }));
                                                 })
                                             }
@@ -544,7 +543,7 @@ app.patch('/books/update*', function (req, res) {
                                                         ).then(() => {
                                                             broadcastUpdate();
                                                             res.writeHead(200);
-                                                            conn.close(); pool.end();
+                                                            conn.release(); conn.close(); pool.end();
                                                             res.end();
                                                             return;
                                                         })
@@ -558,14 +557,13 @@ app.patch('/books/update*', function (req, res) {
                                         }).catch(exception => {
                                             console.log(exception);
                                             res.writeHead(400);
-                                            conn.close(); pool.end();
+                                            conn.release(); conn.close(); pool.end();
                                             res.end(JSON.stringify({ error: exception }));
                                         })
                                     else {
                                         if (oldBook.rentedby) {
                                             conn.query('SELECT rented FROM users WHERE uuid=?', [oldBook.rentedby]).then(response => {
                                                 if (response.length == 0) throw 'USER_NOT_FOUND';
-                                                console.log(response);
                                                 let rentedList = JSON.parse(response[0].rented);
                                                 console.log(rentedList);
                                                 for (let i = 0; i < rentedList.length; i++)
@@ -578,20 +576,20 @@ app.patch('/books/update*', function (req, res) {
                                                     ).then(() => {
                                                         broadcastUpdate();
                                                         res.writeHead(200);
-                                                        conn.close(); pool.end();
+                                                        conn.release(); conn.close(); pool.end();
                                                         res.end();
                                                         return;
                                                     })
                                                 }).catch(exception => {
                                                     console.log(exception);
                                                     res.writeHead(400);
-                                                    conn.close(); pool.end();
+                                                    conn.release(); conn.close(); pool.end();
                                                     res.end(JSON.stringify({ error: exception }));
                                                 })
                                             }).catch(exception => {
                                                 console.log(exception);
                                                 res.writeHead(400);
-                                                conn.close(); pool.end();
+                                                conn.release(); conn.close(); pool.end();
                                                 res.end(JSON.stringify({ error: exception }));
                                             })
                                         } else conn.query('UPDATE books SET title=?, author=?, isbn=?, description=? WHERE uuid=?',
@@ -599,7 +597,7 @@ app.patch('/books/update*', function (req, res) {
                                         ).then(() => {
                                             broadcastUpdate();
                                             res.writeHead(200);
-                                            conn.close(); pool.end();
+                                            conn.release(); conn.close(); pool.end();
                                             res.end();
                                             return;
                                         })
@@ -609,7 +607,7 @@ app.patch('/books/update*', function (req, res) {
                             }).catch(exception => {
                                 console.log(exception);
                                 res.writeHead(400);
-                                conn.close(); pool.end();
+                                conn.release(); conn.close(); pool.end();
                                 res.end(JSON.stringify({ error: exception }));
                             })
 
@@ -672,7 +670,6 @@ app.delete('/books/delete*', function (req, res) {
                                 let rentedby = response[0].rentedby;
                                 conn.query('SELECT rented FROM users WHERE uuid=?', [rentedby]).then(response => {
                                     if (response.length == 0) throw 'USER_NOT_FOUND';
-                                    console.log(response);
                                     let rentedList = JSON.parse(response[0].rented);
                                     console.log(rentedList);
                                     for (let i = 0; i < rentedList.length; i++)
@@ -684,13 +681,13 @@ app.delete('/books/delete*', function (req, res) {
                                         ).then(() => {
                                             broadcastUpdate()
                                             res.writeHead(200);
-                                            conn.close(); pool.end();
+                                            conn.release(); conn.close(); pool.end();
                                             res.end();
                                         }).catch(exception => {
                                             console.log(exception);
-                                            conn.close(); pool.end();
+                                            conn.release(); conn.close(); pool.end();
                                             res.writeHead(400);
-                                            conn.close(); pool.end();
+                                            conn.release(); conn.close(); pool.end();
                                             res.end(JSON.stringify({ error: exception }));
                                         })
                                     })
@@ -703,11 +700,11 @@ app.delete('/books/delete*', function (req, res) {
                                 ).then(response => {
                                     broadcastUpdate()
                                     res.writeHead(200);
-                                    conn.close(); pool.end();
+                                    conn.release(); conn.close(); pool.end();
                                     res.end();
                                 }).catch(exception => {
                                     console.log(exception);
-                                    conn.close(); pool.end();
+                                    conn.release(); conn.close(); pool.end();
                                     res.writeHead(400);
                                     res.end(JSON.stringify({ error: exception }));
                                 })
@@ -715,7 +712,7 @@ app.delete('/books/delete*', function (req, res) {
                     }).catch(exception => {
                         console.log(exception);
                         res.writeHead(400);
-                        conn.close(); pool.end();
+                        conn.release(); conn.close(); pool.end();
                         res.end(JSON.stringify({ error: exception }));
                     })
 
@@ -746,7 +743,7 @@ app.delete('/books/delete*', function (req, res) {
 app.get('/books/search*', function (req, res) {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     let cookie = req.headers.cookie.slice(6);
-    console.log(cookie);
+
     let search = '%' + new URL('https://library.karol.gay' + req.url).searchParams.get('query') + '%';
     console.log(search);
     try {
@@ -766,7 +763,6 @@ app.get('/books/search*', function (req, res) {
         pool.getConnection().then(conn => {
             conn.query('USE ' + databaseCredential.database).then(() => {
                 conn.query('SELECT * FROM books WHERE CONCAT(title, author, isbn, description) LIKE ? ORDER BY title', [search]).then(response => {
-                    console.log(response);
                     let booksList = [];
                     for (let i = 0; i < response.length; i++) {
                         response[i].availableToRent = response[i].rentedby == null;
@@ -777,12 +773,12 @@ app.get('/books/search*', function (req, res) {
                         booksList.push(response[i]);
                     }
                     res.writeHead(200);
-                    conn.close(); pool.end();
+                    conn.release(); conn.close(); pool.end();
                     res.end(JSON.stringify(booksList));
                 }).catch(ex => {
                     console.log(ex);
                     res.writeHead(400);
-                    conn.close(); pool.end();
+                    conn.release(); conn.close(); pool.end();
                     res.end(JSON.stringify({ error: ex }));
                     return;
 
@@ -791,7 +787,7 @@ app.get('/books/search*', function (req, res) {
             }).catch(ex => {
                 console.log(ex);
                 res.writeHead(400);
-                conn.close(); pool.end();
+                conn.release(); conn.close(); pool.end();
                 res.end(JSON.stringify({ error: ex }));
                 return;
             })
@@ -822,10 +818,9 @@ app.get('/resetdevice*', function (req, res) {
         conn.query('USE ' + databaseCredential.database).then(() => {
 
             conn.query('SELECT url FROM redirect WHERE id=?', [id]).then(response => {
-                console.log(response);
                 if (response.length == 0) {
                     res.redirect('https://library.karol.gay/');
-                    conn.close(); pool.end();
+                    conn.release(); conn.close(); pool.end();
                     res.end();
                 }
                 else {
@@ -833,7 +828,7 @@ app.get('/resetdevice*', function (req, res) {
                     let url = response[0].url;
                     console.log(url);
                     res.redirect(url);
-                    conn.close(); pool.end();
+                    conn.release(); conn.close(); pool.end();
                     res.end();
                 }
 
@@ -869,7 +864,6 @@ app.get('/users/get*', function (req, res) {
                     try {
                         conn.query('SELECT uuid, name, admin, email, rented FROM users').then(response => {
                             let userList = [];
-                            console.log(response);
                             for (let i = 0; i < response.length; i++)userList.push({
                                 uuid: response[i].uuid,
                                 name: response[i].name,
@@ -879,12 +873,12 @@ app.get('/users/get*', function (req, res) {
                             });
 
                             res.writeHead(200);
-                            conn.close(); pool.end();
+                            conn.release(); conn.close(); pool.end();
                             res.end(JSON.stringify(userList));
                         }).catch(exception => {
                             console.log(exception);
                             res.writeHead(400);
-                            conn.close(); pool.end();
+                            conn.release(); conn.close(); pool.end();
                             res.end(JSON.stringify({ error: exception }));
                         })
 
@@ -919,7 +913,7 @@ app.get('/users/get*', function (req, res) {
 });
 app.post('/rental/rent*', function (req, res) {
     let cookie = req.headers.cookie.slice(6);
-    console.log(cookie);
+
     let uuid = req.url.substring(13, 49);
     console.log(uuid);
     try {
@@ -944,16 +938,16 @@ app.post('/rental/rent*', function (req, res) {
                         conn.query('UPDATE books SET rentedby=? WHERE uuid=?', [decodedCookie.uuid, uuid]).then(() => {
                             conn.query('SELECT rented FROM users WHERE uuid=?', [decodedCookie.uuid]).then(response => {
                                 if (response.length == 0) throw 'USER_NOT_FOUND';
-                                console.log(response);
+
                                 let rentedList = JSON.parse(response[0].rented);
                                 console.log(rentedList);
                                 rentedList.push(uuid);
                                 console.log(rentedList);
                                 conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(rentedList), decodedCookie.uuid]).then(response => {
-                                    console.log(response);
+
                                     broadcastUpdate();
                                     res.writeHead(200);
-                                    conn.close(); pool.end();
+                                    conn.release(); conn.close(); pool.end();
                                     res.end();
                                 })
                             })
@@ -964,7 +958,7 @@ app.post('/rental/rent*', function (req, res) {
                 }).catch(ex => {
                     console.log(ex);
                     res.writeHead(400);
-                    conn.close(); pool.end();
+                    conn.release(); conn.close(); pool.end();
                     res.end(JSON.stringify({ error: ex }));
                     return;
 
@@ -972,7 +966,7 @@ app.post('/rental/rent*', function (req, res) {
             }).catch(err => {
                 console.log(ex);
                 res.writeHead(400);
-                conn.close(); pool.end();
+                conn.release(); conn.close(); pool.end();
                 res.end(JSON.stringify({ error: ex }));
                 return;
             })
@@ -988,7 +982,7 @@ app.post('/rental/rent*', function (req, res) {
 })
 app.post('/rental/return*', function (req, res) {
     let cookie = req.headers.cookie.slice(6);
-    console.log(cookie);
+
     let uuid = req.url.substring(15, 51);
     console.log(uuid);
     console.log(uuid);
@@ -1008,14 +1002,14 @@ app.post('/rental/return*', function (req, res) {
         pool.getConnection().then(conn => {
             conn.query('USE ' + databaseCredential.database).then(() => {
                 conn.query('SELECT rentedby FROM books WHERE uuid=?', [uuid]).then(response => {
-                    console.log(response);
+
                     if (response.length == 0) throw 'BOOK_NOT_FOUND';
                     if (response[0].rentedby == decodedCookie.uuid) {
                         //return a book;
                         conn.query('UPDATE books SET rentedby=null WHERE uuid=?', [uuid]).then(() => {
                             conn.query('SELECT rented FROM users WHERE uuid=?', [decodedCookie.uuid]).then(response => {
                                 if (response.length == 0) throw 'USER_NOT_FOUND';
-                                console.log(response);
+
                                 let rentedList = JSON.parse(response[0].rented);
                                 console.log(rentedList);
                                 for (let i = 0; i < rentedList.length; i++)
@@ -1023,10 +1017,10 @@ app.post('/rental/return*', function (req, res) {
                                         rentedList.splice(i, 1);
                                 console.log(rentedList);
                                 conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(rentedList), decodedCookie.uuid]).then(response => {
-                                    console.log(response);
+
                                     broadcastUpdate();
                                     res.writeHead(200);
-                                    conn.close(); pool.end();
+                                    conn.release(); conn.close(); pool.end();
                                     res.end();
                                 })
                             })
@@ -1037,7 +1031,7 @@ app.post('/rental/return*', function (req, res) {
                 }).catch(ex => {
                     console.log(ex);
                     res.writeHead(400);
-                    conn.close(); pool.end();
+                    conn.release(); conn.close(); pool.end();
                     res.end(JSON.stringify({ error: ex }));
                     return;
 
@@ -1045,7 +1039,7 @@ app.post('/rental/return*', function (req, res) {
             }).catch(err => {
                 console.log(ex);
                 res.writeHead(400);
-                conn.close(); pool.end();
+                conn.release(); conn.close(); pool.end();
                 res.end(JSON.stringify({ error: ex }));
                 return;
             })
@@ -1063,7 +1057,7 @@ app.post('/rental/return*', function (req, res) {
 app.get('/rental/get', function (req, res) {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     let cookie = req.headers.cookie.slice(6);
-    console.log(cookie);
+
     try {
         let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'RS256' });
         try {
@@ -1081,7 +1075,7 @@ app.get('/rental/get', function (req, res) {
         pool.getConnection().then(conn => {
             conn.query('USE ' + databaseCredential.database).then(() => {
                 conn.query('SELECT * FROM books WHERE rentedby=?', [decodedCookie.uuid]).then(response => {
-                    console.log(response);
+
                     let booksList = [];
                     for (let i = 0; i < response.length; i++) {
                         if (!isUserAdmin) delete response[i].rentedby;
@@ -1091,12 +1085,12 @@ app.get('/rental/get', function (req, res) {
                     }
                     console.log(booksList);
                     res.writeHead(200);
-                    conn.close(); pool.end();
+                    conn.release(); conn.close(); pool.end();
                     res.end(JSON.stringify(booksList));
                 }).catch(ex => {
                     console.log(ex);
                     res.writeHead(400);
-                    conn.close(); pool.end();
+                    conn.release(); conn.close(); pool.end();
                     res.end(JSON.stringify({ error: ex }));
                     return;
 
@@ -1105,7 +1099,7 @@ app.get('/rental/get', function (req, res) {
             }).catch(ex => {
                 console.log(ex);
                 res.writeHead(400);
-                conn.close(); pool.end();
+                conn.release(); conn.close(); pool.end();
                 res.end(JSON.stringify({ error: ex }));
                 return;
             })
@@ -1154,13 +1148,17 @@ function createAccount(mail) {
         conn.query('USE ' + databaseCredential.database).then(() => {
             let uuid = getUuid(mail);
             conn.query("INSERT INTO users (uuid, admin, email) VALUES (?, ?, ?)", [uuid, false, mail]).then(res => {
-                console.log(res);
+
+                conn.release(); conn.close(); pool.end();
+
                 broadcastUpdate();
             }).catch(err => {
+                conn.release(); conn.close(); pool.end();
                 console.log(err);
             })
             sendKeyRegistrationMail(mail);
         }).catch(err => {
+            conn.release(); conn.close(); pool.end();
             console.log(err);
         })
 
