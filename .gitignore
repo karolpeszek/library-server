@@ -1,3 +1,4 @@
 jwt-priv.pem
+jwt-pub.pem
 smtp.json
 sql.json
