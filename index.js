@@ -37,7 +37,7 @@ app.post('/registerKey', function (req, response) {
         try {
             const registrationObject = JSON.parse(userData);
 
-            let decodedResetToken = jwt.verify(registrationObject.resetToken, pubkey, { algorithm: 'RS256' });
+            let decodedResetToken = jwt.verify(registrationObject.resetToken, pubkey, { algorithm: 'PS512' });
 
             console.log(registrationObject);
 
@@ -219,7 +219,7 @@ wssLogin.on("connection", ws => {
                                 uuid: user.uuid,
                                 admin: user.admin == 1
                             }
-                            const token = jwt.sign(trustTokenObject, privkey, { algorithm: 'RS256' });
+                            const token = jwt.sign(trustTokenObject, privkey, { algorithm: 'PS512' });
                             const cookie = JSON.stringify({ kind: 'cookie', cookie: token });
 
                             ws.send(cookie);
@@ -267,7 +267,7 @@ app.get('/books/get*', function (req, res) {
     if (req.url != '/books/get') uuid = req.url.substring(11, 47);
     console.log(uuid);
     try {
-        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'RS256' });
+        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
         try {
             if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
             if (decodedCookie.exp < Date.now()) throw 'COOKIE_EXPIRED';
@@ -348,7 +348,7 @@ app.post('/books/add', function (req, res) {
             console.log(book);
             try {
 
-                let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'RS256' });
+                let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
                 try {
 
                     if (!book.title || !book.author || !book.isbn || !book.description) throw 'INVALID_BOOK';
@@ -484,7 +484,7 @@ app.patch('/books/update*', function (req, res) {
             let book = JSON.parse(bookData);
             try {
 
-                let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'RS256' });
+                let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
                 try {
 
                     console.log(book);
@@ -647,7 +647,7 @@ app.delete('/books/delete*', function (req, res) {
     let uuid = req.url.substring(14, 50);
     try {
 
-        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'RS256' });
+        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
         try {
             if (!uuid) throw 'INVALID_BOOK';
             if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
@@ -748,7 +748,7 @@ app.get('/books/search*', function (req, res) {
     let search = '%' + new URL('https://library.karol.gay' + req.url).searchParams.get('query') + '%';
     console.log(search);
     try {
-        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'RS256' });
+        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
         try {
             if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
             if (decodedCookie.exp < Date.now()) throw 'COOKIE_EXPIRED';
@@ -846,7 +846,7 @@ app.get('/users/get*', function (req, res) {
         let cookie = req.headers.cookie.slice(6);
         try {
 
-            let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'RS256' });
+            let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
             try {
 
                 if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
@@ -918,7 +918,7 @@ app.post('/rental/rent*', function (req, res) {
     let uuid = req.url.substring(13, 49);
     console.log(uuid);
     try {
-        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'RS256' });
+        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
         try {
             if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
             if (decodedCookie.exp < Date.now()) throw 'COOKIE_EXPIRED';
@@ -988,7 +988,7 @@ app.post('/rental/return*', function (req, res) {
     console.log(uuid);
     console.log(uuid);
     try {
-        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'RS256' });
+        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
         try {
             if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
             if (decodedCookie.exp < Date.now()) throw 'COOKIE_EXPIRED';
@@ -1060,7 +1060,7 @@ app.get('/rental/get', function (req, res) {
     let cookie = req.headers.cookie.slice(6);
 
     try {
-        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'RS256' });
+        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
         try {
             if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
             if (decodedCookie.exp < Date.now()) throw 'COOKIE_EXPIRED';
@@ -1194,7 +1194,7 @@ async function sendKeyRegistrationMail(mail) {
                     admin: user.admin == 1
 
                 }
-                const token = jwt.sign(claims, privkey, { algorithm: 'RS256' });
+                const token = jwt.sign(claims, privkey, { algorithm: 'PS512' });
                 const url = createRedirect('https://library.karol.gay/keyreset.html?token=' + token);
 
                 let transporter = nodemailer.createTransport({
