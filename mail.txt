@@ -1,0 +1,22 @@
+Use this link to reset your password. The link is only valid for 15 minutes
+
+[Library] ( https://library.karol.gay )
+                
+************
+Hi {{name}},
+************
+                
+You recently requested to register a new device with your Library account. Remember that you should only do that if you lost a previously registered device or have trouble signing in. Also note tat your old key will stop working after registering a new one. This password reset link is only valid for the next 15 minutes.
+                
+Register new password ( {{action_url}} )
+                
+If you did not request a password reset, please ignore this email or contact support (karol.peszek@gmail.com) if you have questions.
+                
+Thanks,
+The Library team
+                
+If you’re having trouble with the button above, copy and paste the URL below into your web browser.
+                
+{{action_url}}
+                
+Library, a school project by Karol Peszek
