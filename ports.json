@@ -1,0 +1,5 @@
+{
+    "loginPort": 2100,
+    "registerPort": 2101,
+    "updatesPort": 2102
+}

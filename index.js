@@ -1,6 +1,6 @@
 const express = require('express');
 const http = require('http');
-const app = express();
+const cookieParser = require('cookie-parser');
 const fs = require('fs');
 const webSocket = require('ws');
 const jwt = require('jsonwebtoken');
@@ -11,16 +11,14 @@ const crypto = require('crypto');
 const base64url = require('base64url');
 const ellipticcurve = require("starkbank-ecdsa");
 
+const app = express();
+app.use(cookieParser());
 
-const loginPort = 2100;
-const registerPort = 2101;
-const updatesPort = 2102;
+const { loginPort, registerPort, updatesPort } = require(__dirname + '/ports.json');
 
 const privkey = fs.readFileSync(__dirname + '/jwt-priv.pem');
 const pubkey = fs.readFileSync(__dirname + '/jwt-pub.pem');
 const databaseCredential = require(__dirname + '/sql.json')
-
-const pool = mariadb.createPool(databaseCredential);
 
 const wssLogin = new webSocket.Server({ port: loginPort })
 const wssUpdates = new webSocket.Server({ port: updatesPort });
@@ -28,1305 +26,1050 @@ var server = http.createServer(app).listen(registerPort, function () {
     console.log('Started Library Service, listening on ports', loginPort, registerPort, updatesPort, '. It\'s', new Date(Date.now()).toString());
 });
 
-let updatesClientsList = [];
-
-app.post('/registerKey', function (req, response) {
-    console.log('registerkey');
-    let userData = "";
-    req.on('data', (chunk) => {
-        userData += chunk.toString();
-    });
-    req.on('end', () => {
-        try {
-            const registrationObject = JSON.parse(userData);
-
-            let decodedResetToken = jwt.verify(registrationObject.resetToken, pubkey, { algorithm: 'PS512' });
-
-            console.log(registrationObject);
-
-            if (decodedResetToken.iss != 'library.karol.gay' || decodedResetToken.kind != 'key-reset' || decodedResetToken.exp < Date.now() ||
-                registrationObject.clientDataJson.type != 'webauthn.create' || registrationObject.clientDataJson.origin != 'https://library.karol.gay'
-            ) throw 'Exception key mismatch or invalid token';
-
-
-            console.log('Connecting to database'); pool.getConnection().then(conn => {
-                conn.query('USE ' + databaseCredential.database).then(() => {
-                    conn.query('SELECT * FROM users WHERE uuid=?', [decodedResetToken.uuid]).then(res => {
-                        if (btoa(decodedResetToken.nonce).replace('==', '') == registrationObject.clientDataJson.challenge) console.log('NONCE_MATCH');
-                        if (res[0].nonce < decodedResetToken.iat &&
-                            btoa(decodedResetToken.nonce).replace('==', '') == registrationObject.clientDataJson.challenge
-                        ) {
-                            conn.query("UPDATE users SET name=?, pubkey=?, keyid=?, nonce=? WHERE uuid=?", [registrationObject.userName, registrationObject.publicKey, registrationObject.keyId, decodedResetToken.iat, decodedResetToken.uuid]).then(res => {
-                                response.writeHead(200);
-                                response.end();
-                                console.log('Releasing connection'); conn.release(); conn.close();
-                            })
-                        }
-                        else {
-                            console.log('TOKEN_TOO_OLD');
-                            response.writeHead(400);
-                            console.log('Releasing connection'); conn.release(); conn.close();
-                            response.end('ERROR_TOKEN_TOO_OLD');
-                        }
-                    })
-                }).catch(err => {
-                    console.log(err);
-                    response.writeHead(400);
-                    console.log('Releasing connection'); conn.release(); conn.close();
-                    response.end('ERROR_VALIDATING_DATA');
-                })
-
-            });
-
-        } catch (exception) {
-            console.log(exception);
-            response.writeHead(400);
-            response.end('ERROR_VALIDATING_DATA');
-        }
-    });
-});
-app.post('/register', function (req, res) {
-    console.log('register');
-
-    let userData = "";
-    req.on('data', (chunk) => {
-        userData += chunk.toString();
-    });
-    req.on('end', () => {
-        try {
-            console.log(userData);
-            var data = JSON.parse(userData);
-            console.log(data);
-            if (!validateEmail(data.mail)) throw 'INVALID_EMAIL';
-            createAccount(data.mail);
-            res.writeHead(200);
-            res.end();
-        } catch (err) {
-            console.log(err);
-            res.writeHead(400);
-            res.end();
-        }
-    });
-
-});
+//KEYS
 app.post('/lostkey', function (req, res) {
-    console.log('lostkey');
-    let userData = "";
+    let postData = "";
     req.on('data', (chunk) => {
-        userData += chunk.toString();
+        postData += chunk.toString();
     });
-    req.on('end', () => {
+    req.on('end', async () => {
         try {
-            var data = JSON.parse(userData);
-            console.log(data);
-            if (!validateEmail(data.mail)) throw 'INVALID_EMAIL';
-            sendKeyRegistrationMail(data.mail);
+            console.log('Starting key reset procedure');
+            let conn = await mariadb.createConnection(databaseCredential); await conn.query('USE ' + databaseCredential.database);
+            let parsedUserData = JSON.parse(postData);
+            if (!parsedUserData.email) throw 'NO_EMAIL_ADDRESS_GIVEN';
+            let email = parsedUserData.email;
+            if (!String(email)
+                .toLowerCase()
+                .match(
+                    /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/
+                )) throw 'INVALID_EMAIL_ADDRESS';
+            let emailSearchResult = await conn.query('SELECT * FROM users WHERE email=?', [email]);
+            if (emailSearchResult.length != 1) throw 'USER_DOES_NOT_EXIST';
+
+            sendKeyRegistrationMail(email);
+
+            conn.close();
             res.writeHead(200);
             res.end();
-        } catch (err) {
-            console.log(err);
+        } catch (exception) {
+            console.log('Key reset procedure failed with exception', exception);
             res.writeHead(400);
-            res.end();
+            res.end(exception);
+
         }
     });
 })
-wssLogin.on("connection", ws => {
-    console.log('connection');
+app.post('/registerKey', function (req, res) {
+    console.log('registerkey');
+    let postData = "";
+    req.on('data', (chunk) => {
+        postData += chunk.toString();
+    });
+    req.on('end', async () => {
+        try {
+            console.log('Starting key registration procedure');
+            let conn = await mariadb.createConnection(databaseCredential); await conn.query('USE ' + databaseCredential.database);
+            const registrationObject = JSON.parse(postData);
+            let decodedResetToken = null;
+            try {
+                decodedResetToken = jwt.verify(registrationObject.resetToken, pubkey, { algorithm: 'PS512' });
+            } catch (exception) {
+                console.log(exception);
+                throw 'ERROR_TOKEN_OR_SIGNATURE_INVALID';
+            }
+            console.log(registrationObject);
+            console.log(decodedResetToken);
+            if (!registrationObject.publicKey ||
+                !registrationObject.keyId ||
+                !registrationObject.clientDataJson ||
+                decodedResetToken.iss != 'library.karol.gay' ||
+                decodedResetToken.kind != 'key-reset' ||
+                !decodedResetToken.nonce ||
+                !decodedResetToken.iat ||
+                !decodedResetToken.exp ||
+                !decodedResetToken.mail ||
+                !decodedResetToken.uuid
+            ) throw 'INVALID_TOKEN_OR_MISSING_FIELDS';
+            if (registrationObject.exp < Date.now()) throw 'TOKEN_EXPIRED';
+            if (registrationObject.clientDataJson.type != 'webauthn.create') throw 'INVALID_CEREMONY_TYPE';
+            if (registrationObject.clientDataJson.origin != 'https://library.karol.gay') throw 'KEY_INVALID_ORIGIN';
+            if (btoa(decodedResetToken.nonce).replace('==', '') != registrationObject.clientDataJson.challenge) throw 'NONCE_MISMATCH';
+
+            console.log('User registartion object:', registrationObject);
+
+            let userQueryReponse = await conn.query('SELECT * FROM users WHERE uuid=?', [decodedResetToken.uuid]);
+            if (userQueryReponse.length == 0) throw 'USER_NOT_FOUND';
+            if (userQueryReponse[0].nonce > decodedResetToken.iat) throw 'NEWER_TOKEN_ALREADY_USED';
+
+            await conn.query("UPDATE users SET name=?, pubkey=?, keyid=?, nonce=? WHERE uuid=?", [registrationObject.userName || decodedResetToken.email, registrationObject.publicKey, registrationObject.keyId, decodedResetToken.iat, decodedResetToken.uuid]);
+
+            console.log('Succesfully updated key for user', decodedResetToken.uuid);
+
+            conn.close();
+            res.writeHead(200);
+            res.end();
+            return;
+
+        } catch (exception) {
+            console.log('Key registration procedure failed with exception', exception);
+            res.writeHead(400);
+            res.end(exception);
+        }
+    });
+});
+app.get('/resetdevice*', async function (req, res) {
+    try {
+
+        console.log('Starting redirect procedudre');
+        let conn = await mariadb.createConnection(databaseCredential); await conn.query('USE ' + databaseCredential.database);
+        let id = new URL('https://library.karol.gay' + req.url).searchParams.get('token');
+        if (!id) throw 'REDIRECT_ID_NULL_OR_EMPTY'
+        console.log('User redirect id:', id);
+        let queryResult = await conn.query('SELECT url FROM redirect WHERE id=?', [id]);
+        if (queryResult.length == 0) throw 'REDIRECT_ID_NOT_FOUND';
+        let link = queryResult[0].url;
+        conn.close();
+        res.redirect(link);
+        res.end();
+        return;
+    } catch (exception) {
+        console.log('Redirect procedure failed with exception:', exception);
+        res.redirect('https://library.karol.gay/');
+        res.end();
+        return;
+    }
+});
+async function sendKeyRegistrationMail(email) {
+    let conn = await mariadb.createConnection(databaseCredential); await conn.query('USE ' + databaseCredential.database);
+    if (!email) throw 'EMAIL_NULL_OR_EMPTY';
+    console.log('Sending key registration email to', email);
+    let userQueryResponse = await conn.query('SELECT * FROM users WHERE email=?', [email]);
+    if (userQueryResponse.length == 0) throw 'USER_NOT_FOUND';
+    let user = userQueryResponse[0];
 
     var nonce = "";
     const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     for (var i = 0; i < 64; i++)
         nonce += possible.charAt(Math.floor(Math.random() * possible.length));
-    ws.send(JSON.stringify({ kind: 'challange', challange: nonce }))
 
-    ws.on("message", message => {
+    const claims = {
+        iss: "library.karol.gay",
+        kind: "key-reset",
+
+        nonce: nonce,
+
+        iat: Date.now(),
+        exp: Date.now() + 900000,
+
+        name: user.name || user.email,
+        mail: user.email,
+        uuid: user.uuid,
+        admin: user.admin == 1
+
+    }
+
+    const token = jwt.sign(claims, privkey, { algorithm: 'PS512' });
+    const url = await createRedirect('https://library.karol.gay/keyreset.html?token=' + token);
+
+    let messageText = fs.readFileSync(__dirname + '/mail.txt').toString();
+    let messageHtml = fs.readFileSync(__dirname + '/mail.html').toString();
+
+    let message = {
+        from: '"Library 📖" <library@karol.gay>',
+        to: claims.mail,
+        subject: 'Register new device with your account',
+        text: messageText.replaceAll('{{name}}', claims.name).replaceAll('{{action_url}}', url),
+        html: messageHtml.replaceAll('{{name}}', claims.name).replaceAll('{{action_url}}', url),
+        attachments: []
+    };
+    let transporter = nodemailer.createTransport({
+        host: "in-v3.mailjet.com",
+        port: 587,
+        secure: false,
+        auth: require('./smtp.json')
+    });
+    try {
+        await transporter.sendMail(message);
+    } catch (exception) {
+        console.log('Failed to send an email with exception', exception);
+        throw 'EMAIL_FAILED_TO_SEND';
+    }
+    conn.close();
+    return;
+}
+async function createRedirect(url) {
+    if (!url) throw 'ERROR_URL_NULL_OR_EMPTY';
+    console.log('Creating redirect url for url', url);
+    let conn = await mariadb.createConnection(databaseCredential); await conn.query('USE ' + databaseCredential.database);
+    var nonce = "";
+    const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    for (var i = 0; i < 64; i++)
+        nonce += possible.charAt(Math.floor(Math.random() * possible.length));
+
+
+    let id = crypto.createHash('sha256').update(nonce + url).digest('hex');
+    console.log('ID for this url is', id);
+
+    await conn.query('INSERT INTO redirect (id, url) VALUES (?, ?)', [id, url]);
+    conn.close();
+    return 'https://library.karol.gay/resetdevice?token=' + id;
+}
+
+//SIGNUP
+app.post('/register', function (req, res) {
+    let postData = "";
+    req.on('data', (chunk) => {
+        postData += chunk.toString();
+    });
+    req.on('end', async () => {
         try {
-            let assertionObject = JSON.parse(new TextDecoder().decode(message));
+            console.log('Starting user signup procedure');
+            let conn = await mariadb.createConnection(databaseCredential); await conn.query('USE ' + databaseCredential.database);
+            let parsedUserData = JSON.parse(postData);
+            if (!parsedUserData.email) throw 'NO_EMAIL_ADDRESS_GIVEN';
+            let email = parsedUserData.email;
+            let uuid = getUuid(email);
+            if (!String(email)
+                .toLowerCase()
+                .match(
+                    /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/
+                )) throw 'INVALID_EMAIL_ADDRESS';
+            let emailSearchResult = await conn.query('SELECT * FROM USERS WHERE email=?', [email]);
+            if (emailSearchResult.length == 1) throw 'EMAIL_ALREADY_TAKEN';
 
 
-            console.log('Connecting to database'); pool.getConnection().then(conn => {
-                conn.query('USE ' + databaseCredential.database).then(() => {
-                    conn.query("SELECT * FROM users WHERE keyid=?", [assertionObject.keyId]).then(async res => {
-                        function fromUTF8String(utf8String) {
-                            const encoder = new globalThis.TextEncoder();
-                            return encoder.encode(utf8String);
-                        }
+            await conn.query('INSERT INTO users (uuid, admin, email) VALUES (?, ?, ?)', [uuid, false, email]);
 
-                        async function digest(data, _algorithm) {
-                            const hashed = await crypto.webcrypto.subtle.digest('SHA-256', data);
+            sendKeyRegistrationMail(email);
+            broadcastUpdate();
 
-                            return new Uint8Array(hashed);
-                        }
+            console.log('Succesfully create an account for', uuid);
 
-                        async function toHash(data, algorithm = -7) {
-                            if (typeof data === 'string') {
-                                data = fromUTF8String(data);
-                            }
-
-                            return digest(data, algorithm);
-                        }
-                        function concat(arrays) {
-                            let pointer = 0;
-                            const totalLength = arrays.reduce((prev, curr) => prev + curr.length, 0);
-
-                            const toReturn = new Uint8Array(totalLength);
-
-                            arrays.forEach((arr) => {
-                                toReturn.set(arr, pointer);
-                                pointer += arr.length;
-                            });
-
-                            return toReturn;
-                        }
-                        let user = res[0];
-                        console.log(user);
-                        console.log(assertionObject);
-                        var Ecdsa = ellipticcurve.Ecdsa;
-                        var Signature = ellipticcurve.Signature;
-                        var PublicKey = ellipticcurve.PublicKey;
-
-                        let decodedAuthData = decodeAuthData(assertionObject.authData.replaceAll('=', ''));
-                        let decodedUserData = JSON.parse(atob(assertionObject.clientData));
-                        let publicKey = PublicKey.fromPem(user.pubkey);
-                        let signature = Signature.fromDer(atob(assertionObject.signature));
-                        let authDataBuffer = base64url.toBuffer(assertionObject.authData);
-                        const clientDataHash = await toHash(base64url.toBuffer(assertionObject.clientData));
-
-                        const signatureBase = concat([authDataBuffer, clientDataHash]);
-
-                        console.log(decodedUserData);
-                        console.log(decodedAuthData);
-                        let signedCorrectly = Ecdsa.verify(signatureBase, signature, publicKey);
-                        let nonceMatch = decodedUserData.challenge == btoa(nonce).replace('==', '');
-                        let rpidMatch = decodedAuthData.rpIdHash == 'g0Wwcdu/y9I4JMxQaL9PcnCQSwMAhazy';
-                        let ceremonyMatch = decodedUserData.type == 'webauthn.get';
-                        let originMatch = decodedUserData.origin == 'https://library.karol.gay';
-
-                        console.log('Signed correcly', signedCorrectly);
-                        console.log('Nonce match', nonceMatch);
-                        console.log('RPID Match', rpidMatch);
-                        console.log('Ceremony Match', ceremonyMatch);
-                        console.log('Origin match', originMatch);
-                        if (signedCorrectly &&
-                            rpidMatch &&
-                            nonceMatch &&
-                            ceremonyMatch &&
-                            originMatch
-                        ) {
-                            console.log('user verified!');
-                            const trustTokenObject = {
-                                iss: 'library.karol.gay',
-                                kind: 'trust-cookie',
-                                nonce: nonce,
-                                iat: Date.now(),
-                                exp: Date.now() + 86400000, //24h
-                                name: user.name,
-                                mail: user.mail,
-                                uuid: user.uuid,
-                                admin: user.admin == 1
-                            }
-                            const token = jwt.sign(trustTokenObject, privkey, { algorithm: 'PS512' });
-                            const cookie = JSON.stringify({ kind: 'cookie', cookie: token });
-
-                            ws.send(cookie);
-                            ws.close();
-                            console.log('Releasing connection'); conn.release(); conn.close();
-
-                        }
-                        else {
-                            let authenticationFailure = {
-                                signedCorrectly: signedCorrectly,
-                                nonceMatch: nonceMatch,
-                                rpidHashMatch: rpidMatch,
-                                ceremonyTypeMatch: ceremonyMatch,
-                                originMatch: originMatch
-                            }
-                            ws.send(JSON.stringify({ kind: 'authentication-failure', reason: authenticationFailure }));
-                            ws.close();
-                            console.log('Releasing connection'); conn.release(); conn.close();
-                        }
-
-
-                    }).catch(err => {
-                        console.log(err);
-                        console.log('Releasing connection'); conn.release(); conn.close();
-                    })
-
-                }).catch(err => {
-                    console.log(err);
-                    console.log('Releasing connection'); conn.release(); conn.close();
-                })
-            });
+            conn.close();
+            res.writeHead(200);
+            res.end();
         } catch (exception) {
-            console.log(exception);
-            console.log('Releasing connection'); conn.release(); conn.close();
+            console.log('User signup procedure failed with exception', exception);
+            res.writeHead(400);
+            res.end(exception);
+        }
+    });
+
+});
+
+//SIGNIN
+wssLogin.on("connection", ws => {
+    console.log('Starting user assertion procedure');
+
+    var challange = "";
+    const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    for (var i = 0; i < 64; i++)
+        challange += possible.charAt(Math.floor(Math.random() * possible.length));
+
+    ws.send(JSON.stringify({ kind: 'challange', challange: challange }))
+
+    ws.on("message", async message => {
+        try {
+            let conn = await mariadb.createConnection(databaseCredential); await conn.query('USE ' + databaseCredential.database);
+            let assertionObject = JSON.parse(new TextDecoder().decode(message));
+            if (!assertionObject.keyId ||
+                !assertionObject.clientData ||
+                !assertionObject.authData ||
+                !assertionObject.signature
+            ) throw 'ASSERTION_MISSING_FIELDS';
+            let userSearchResponse = await conn.query('SELECT * FROM users WHERE keyid=?', [assertionObject.keyId]);
+            if (userSearchResponse.length == 0) throw 'USER_NOT_FOUND';
+            let user = userSearchResponse[0];
+            console.log('Authenticating user', user);
+
+            async function digest(data, _algorithm) {
+                const hashed = await crypto.webcrypto.subtle.digest('SHA-256', data);
+
+                return new Uint8Array(hashed);
+            }
+            async function toHash(data, algorithm = -7) {
+                function fromUTF8String(utf8String) {
+                    const encoder = new globalThis.TextEncoder();
+                    return encoder.encode(utf8String);
+                }
+                if (typeof data === 'string') {
+                    data = fromUTF8String(data);
+                }
+
+                return digest(data, algorithm);
+            }
+            function concat(arrays) {
+                let pointer = 0;
+                const totalLength = arrays.reduce((prev, curr) => prev + curr.length, 0);
+
+                const toReturn = new Uint8Array(totalLength);
+
+                arrays.forEach((arr) => {
+                    toReturn.set(arr, pointer);
+                    pointer += arr.length;
+                });
+
+                return toReturn;
+            }
+            function decodeAuthData(authData) {
+                console.log('decode auth data');
+                let FLAG_UP = 0x01; // Flag for userPresence
+                let FLAG_UV = 0x04; // Flag for userVerification
+                let FLAG_AT = 0x40; // Flag for attestedCredentialData
+                let FLAG_ED = 0x80; // Flag for extensions
+
+                let rpIdHash = authData.slice(0, 32);
+                let flags = authData.slice(32, 33)[0];
+                let signCount = authData.slice(33, 37);
+
+                if ((flags & FLAG_AT) === 0x00) {
+                    // no attestedCredentialData
+                    return {
+                        rpIdHash: rpIdHash,
+                        flags: flags,
+                        signCount: signCount
+                    }
+                }
+
+                if (authData.length < 38) {
+                    // attestedCredentialData missing
+                    throw 'invalid authData.length';
+                }
+
+                let aaguid = authData.slice(37, 53);
+                let credentialIdLength = (authData[53] << 8) + authData[54]; //16-bit unsigned big-endian integer
+                let credenitalId = authData.slice(55, 55 + credentialIdLength);
+                let credentialPublicKey = this.decodeCredentialPublicKey(authData.slice(55 + credentialIdLength));
+
+                /* decoding extensions - not implemented */
+
+                return {
+                    rpIdHash: rpIdHash,
+                    flags: flags,
+                    signCount: signCount,
+                    attestedCredentialData: {
+                        aaguid: aaguid,
+                        credentialId: credenitalId,
+                        credentialPublicKey: credentialPublicKey
+                    }
+                }
+            }
+
+            let Ecdsa = ellipticcurve.Ecdsa;
+            let Signature = ellipticcurve.Signature;
+            let PublicKey = ellipticcurve.PublicKey;
+
+            let decodedAuthData = decodeAuthData(assertionObject.authData.replaceAll('=', ''));
+            let decodedUserData = JSON.parse(atob(assertionObject.clientData));
+            console.log('User provided data:', decodedUserData);
+            console.log('Authenticator provided data:', decodedAuthData);
+
+            let publicKey = PublicKey.fromPem(user.pubkey);
+            let signature = Signature.fromDer(atob(assertionObject.signature));
+
+            let authDataBuffer = base64url.toBuffer(assertionObject.authData);
+            let clientDataHash = await toHash(base64url.toBuffer(assertionObject.clientData));
+            let signatureBase = concat([authDataBuffer, clientDataHash]);
+
+            let authenticationResult = {
+                signedCorrectly: Ecdsa.verify(signatureBase, signature, publicKey),
+                challangeMatch: decodedUserData.challenge == btoa(challange).replace('==', ''),
+                rpidMatch: decodedAuthData.rpIdHash == 'g0Wwcdu/y9I4JMxQaL9PcnCQSwMAhazy',
+                ceremonyMatch: decodedUserData.type == 'webauthn.get',
+                originMatch: decodedUserData.origin == 'https://library.karol.gay'
+            };
+
+            console.log('User authentication result', authenticationResult);
+
+            if (authenticationResult.signedCorrectly && authenticationResult.challangeMatch && authenticationResult.rpidMatch && authenticationResult.ceremonyMatch && authenticationResult.originMatch) {
+
+                let trustCookieObject = {
+                    iss: 'library.karol.gay',
+                    kind: 'trust-cookie',
+                    nonce: challange,
+                    iat: Date.now(),
+                    exp: Date.now() + 86400000, //24h
+                    name: user.name,
+                    mail: user.mail,
+                    uuid: user.uuid,
+                    admin: user.admin == 1
+                }
+                let token = jwt.sign(trustCookieObject, privkey, { algorithm: 'PS512' });
+                let cookie = 'token=' + token + ';secure;path=/;expires=' + trustCookieObject.exp;
+
+
+                ws.send(JSON.stringify({ kind: 'cookie', cookie: cookie }));
+                ws.close();
+
+
+            } else throw 'USER_AUTHENTICATION_FAILURE';
+            conn.close();
+
+        } catch (exception) {
+            console.log('User assertion procedure failed with exception', exception);
+            ws.send(JSON.stringify({ kind: 'exception', error: exception }));
+            ws.close();
         }
     });
 
 
 });
-app.get('/books/get*', function (req, res) {
-    console.log('books get');
-    res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    let cookie = req.headers.cookie.slice(6);
-
-    let uuid = "";
-    if (req.url != '/books/get') uuid = req.url.substring(11, 47);
-    console.log(uuid);
+async function getUserFromCookie(cookie) {
+    let conn = await mariadb.createConnection(databaseCredential); await conn.query('USE ' + databaseCredential.database);
+    if (!cookie) throw 'UNAUTHORIZED';
+    let decodedCookie = null;
     try {
-        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
-        try {
-            if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
-            if (decodedCookie.exp < Date.now()) throw 'COOKIE_EXPIRED';
+        decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
+    } catch (exception) {
+        console.log(exception);
+        throw 'ERROR_COOKIE_OR_SIGNATURE_INVALID';
+    }
+    console.log('User provided cookie', decodedCookie);
+    if (
+        decodedCookie.iss != 'library.karol.gay' ||
+        decodedCookie.kind != 'trust-cookie' ||
+        !decodedCookie.nonce ||
+        !decodedCookie.iat ||
+        !decodedCookie.exp ||
+        !decodedCookie.name ||
+        !decodedCookie.uuid
+    ) throw 'COOKIE_MISSING_FIELDS';
+    if (decodedCookie.exp < Date.now()) throw 'COOKIE_EXPIRED';
+    let user = {
+        authenticated: true,
+        admin: decodedCookie.admin === true,
+        uuid: decodedCookie.uuid
+    }
+    console.log('User return with object', user);
+    conn.close();
+    return user;
+}
+
+
+//BOOKS
+app.get('/books/get*', async function (req, res) {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    try {
+        console.log('Starting books get procedure');
+        let conn = await mariadb.createConnection(databaseCredential); await conn.query('USE ' + databaseCredential.database);
+        let user = await getUserFromCookie(req.cookies['token']);
+        if (!user.authenticated) throw 'UNAUTHORIZED';
+
+        if (req.url == '/books/get') {
+            let books = await conn.query('SELECT * FROM books ORDER BY title');
+            let booksList = [];
+            for (let i = 0; i < books.length; i++) {
+                books[i].availableToRent = books[i].rentedby == null;
+                books[i].rentedByYou = books[i].rentedby == user.uuid;
+                if (!user.admin) delete books[i].rentedby;
+                booksList.push(books[i]);
+            }
+            res.writeHead(200);
+            res.end(JSON.stringify(booksList));
+
+
+        } else {
+            let bookUuid = (req.url + new Array(50).join('X')).substring(11, 47); //pad to avoid exception
+            let bookSearchResult = await conn.query('SELECT * FROM books WHERE uuid=?', [bookUuid]);
+            if (bookSearchResult.length == 0) throw 'BOOK_NOT_FOUND';
+            let book = bookSearchResult[0];
+            book.availableToRent = book.rentedby == null;
+            book.rentedByYou = book.rentedby == user.uuid;
+            if (!user.admin) delete book.rentedby;
+
+            conn.close();
+            res.writeHead(200);
+            res.end(JSON.stringify(book));
         }
-        catch (ex) {
-            console.log(ex);
-            res.writeHead(400);
-            res.end(JSON.stringify({ error: ex }));
+    } catch (exception) {
+        console.log('Books get procedure failed with exception', exception);
+        if ([
+            'UNAUTHORIZED',
+            'ERROR_COOKIE_OR_SIGNATURE_INVALID',
+            'COOKIE_MISSING_FIELDS',
+            'COOKIE_EXPIRED'
+        ].includes(exception)) {
+            res.writeHead(401);
+            res.end(exception);
             return;
         }
+        if ([
+            'BOOK_NOT_FOUND'
+        ].includes(exception)) {
+            res.writeHead(404);
+            res.end(exception);
+            return;
+        }
+        res.writeHead(500);
+        res.end(exception);
 
-        let isUserAdmin = decodedCookie.admin === true;
-        console.log('Connecting to database'); pool.getConnection().then(conn => {
-            conn.query('USE ' + databaseCredential.database).then(() => {
-
-                if (uuid)
-                    conn.query('SELECT * FROM books WHERE uuid=?', [uuid]).then(response => {
-                        if (response.length == 1) {
-                            response[0].availableToRent = response[0].rentedby == null;
-                            response[0].rentedByYou = response[0].rentedby == decodedCookie.uuid;
-                            if (!isUserAdmin) delete response[0].rentedby;
-                            res.writeHead(200);
-                            console.log('Releasing connection'); conn.release(); conn.close();
-                            res.end(JSON.stringify(response[0]));
-                            return;
-                        } else throw 'BOOK_DOES_NOT_EXIST';
-
-                    }).catch(ex => {
-                        console.log(ex);
-                        res.writeHead(400);
-                        console.log('Releasing connection'); conn.release(); conn.close();
-                        res.end(JSON.stringify({ error: ex }));
-                        return;
-
-                    });
-                else
-                    conn.query('SELECT * FROM books ORDER BY title').then(response => {
-                        let booksList = [];
-                        for (let i = 0; i < response.length; i++) {
-                            response[i].availableToRent = response[i].rentedby == null;
-                            response[i].rentedByYou = response[i].rentedby == decodedCookie.uuid;
-                            if (!isUserAdmin) delete response[i].rentedby;
-                            booksList.push(response[i]);
-                        }
-                        res.writeHead(200);
-                        console.log('Releasing connection'); conn.release(); conn.close();
-                        res.end(JSON.stringify(booksList));
-                    });
-            }).catch(err => {
-                console.log(ex);
-                res.writeHead(400);
-                console.log('Releasing connection'); conn.release(); conn.close();
-                res.end(JSON.stringify({ error: ex }));
-                return;
-            })
-
-        });
-
-
-    } catch (ex) {
-        console.log(ex);
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: ex }));
-        return;
     }
-
-
 })
 app.post('/books/add', function (req, res) {
-    console.log('books add');
-    let bookData = "";
+    let postData = "";
     req.on('data', (chunk) => {
-        bookData += chunk.toString();
+        postData += chunk.toString();
     });
-    req.on('end', () => {
+    req.on('end', async () => {
         try {
-            let cookie = req.headers.cookie.slice(6);
-            let book = JSON.parse(bookData);
-            console.log(book);
-            try {
+            console.log('Starting books add procedure');
+            let conn = await mariadb.createConnection(databaseCredential); await conn.query('USE ' + databaseCredential.database);
+            let user = await getUserFromCookie(req.cookies['token']);
+            if (!user.authenticated) throw 'UNAUTHORIZED';
+            if (!user.admin) throw 'USER_NOT_ADMIN';
 
-                let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
-                try {
+            let book = JSON.parse(postData);
 
-                    if (!book.title || !book.author || !book.isbn || !book.description) throw 'INVALID_BOOK';
-                    if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
-                    if (decodedCookie.exp < Date.now()) throw 'COOKIE_EXPIRED';
-                    if (decodedCookie.admin !== true) throw 'USER_NOT_ADMIN';
-                }
-                catch (ex) {
-                    console.log(ex);
-                    res.writeHead(400);
-                    res.end(JSON.stringify({ error: ex }));
-                    return;
-                }
-                var nonce = "";
-                const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-                for (var i = 0; i < 64; i++)
-                    nonce += possible.charAt(Math.floor(Math.random() * possible.length));
-                let uuid = getUuid(crypto.createHash('sha256').update(bookData).digest('hex') + nonce);
+            if (
+                !book.title ||
+                !book.author ||
+                !book.description ||
+                !book.isbn
+            ) throw 'BOOK_MISSING_FIELDS';
 
-                console.log('Connecting to database'); pool.getConnection().then(conn => {
-                    conn.query('USE ' + databaseCredential.database).then(() => {
+            var nonce = "";
+            const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+            for (var i = 0; i < 64; i++)
+                nonce += possible.charAt(Math.floor(Math.random() * possible.length));
+            let uuid = getUuid(crypto.createHash('sha256').update(postData).digest('hex') + nonce);
 
-                        if (book.rentedby) {
-                            conn.query('SELECT * FROM users WHERE uuid=?', [book.rentedby]).then(response => {
-                                if (response.length == 0) throw 'USER_NOT_FOUND';
-                                let user = response[0];
-                                try {
-                                    conn.query('SELECT rentedby FROM books WHERE uuid=?', [uuid]).then(response => {
+            if (book.rentedby) {
+                let userSearch = await conn.query('SELECT * FROM users WHERE uuid=?', [book.rentedby]);
+                if (userSearch.length == 0) throw 'USER_NOT_FOUND';
+                let user = userSearch[0];
+                let rentedList = JSON.parse(user.rented);
+                rentedList.push(uuid);
+                await conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(rentedList), book.rentedby]);
+                await conn.query('INSERT INTO books (uuid, title, author, isbn, description, rentedby) VALUES (?, ?, ?, ?, ?, ?)',
+                    [uuid, book.title, book.author, book.isbn, book.description, book.rentedby]);
 
-                                        if (response.length == 0) {
-                                            conn.query('INSERT INTO books (uuid, title, author, isbn, description, rentedby) VALUES (?, ?, ?, ?, ?, ?)',
-                                                [uuid, book.title, book.author, book.isbn, book.description, book.rentedby]
-                                            ).then(() => {
-                                                let list = JSON.parse(user.rented);
-                                                list.push(uuid);
-                                                conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(list), book.rentedby]).then(() => {
-                                                    broadcastUpdate()
-                                                    res.writeHead(200);
-                                                    console.log('Releasing connection'); conn.release(); conn.close();
-                                                    res.end();
-                                                }).catch(exception => {
-                                                    console.log(exception);
-                                                    res.writeHead(400);
-                                                    console.log('Releasing connection'); conn.release(); conn.close();
-                                                    res.end(JSON.stringify({ error: exception }));
-                                                })
-
-                                            }).catch(exception => {
-                                                console.log(exception);
-                                                res.writeHead(400);
-                                                console.log('Releasing connection'); conn.release(); conn.close();
-                                                res.end(JSON.stringify({ error: exception }));
-                                            })
-                                        } else throw 'BOOK_ALREADY_EXISTS';
-                                    }).catch(exception => {
-                                        console.log(exception);
-                                        res.writeHead(400);
-                                        console.log('Releasing connection'); conn.release(); conn.close();
-                                        res.end(JSON.stringify({ error: exception }));
-                                    })
-
-                                } catch (ex) {
-                                    console.log(ex);
-                                }
-                            }).catch(exception => {
-                                console.log(exception);
-                                res.writeHead(400);
-                                console.log('Releasing connection'); conn.release(); conn.close();
-                                res.end(JSON.stringify({ error: exception }));
-                            })
-
-                        }
-                        else
-                            try {
-                                conn.query('SELECT * FROM books WHERE uuid=?', [uuid]).then(response => {
-                                    if (response.length == 0) {
-                                        conn.query('INSERT INTO books (uuid, title, author, isbn, description) VALUES (?, ?, ?, ?, ?)',
-                                            [uuid, book.title, book.author, book.isbn, book.description]
-                                        ).then(response => {
-                                            broadcastUpdate()
-                                            res.writeHead(200);
-                                            console.log('Releasing connection'); conn.release(); conn.close();
-                                            res.end();
-                                        })
-                                    } else throw 'BOOK_ALREADY_EXISTS';
-                                }).catch(exception => {
-                                    console.log(exception);
-                                    res.writeHead(400);
-                                    console.log('Releasing connection'); conn.release(); conn.close();
-                                    res.end(JSON.stringify({ error: exception }));
-                                })
-
-                            } catch (ex) {
-                                console.log(ex);
-                            }
-                    }).catch(err => {
-
-                    })
-
-                });
-
-
-
-                console.log(decodedCookie);
-
-            } catch (ex) {
-                console.log(ex);
-                res.writeHead(400);
-                res.end(JSON.stringify({ error: ex }));
+                broadcastUpdate();
+                conn.close();
+                res.writeHead(200);
+                res.end();
                 return;
             }
-        } catch (ex) {
-            console.log(ex);
-            res.writeHead(400);
-            res.end(JSON.stringify({ error: ex }));
-            return;
-        }
+            else {
+                await conn.query('INSERT INTO books (uuid, title, author, isbn, description, rentedby) VALUES (?, ?, ?, ?, ?, NULL)',
+                    [uuid, book.title, book.author, book.isbn, book.description]);
 
+                broadcastUpdate();
+                conn.close();
+                res.writeHead(200);
+                res.end();
+                return;
+            }
+
+
+
+
+
+        } catch (exception) {
+            console.log('Books add procedure failed with exception', exception);
+            if ([
+                'UNAUTHORIZED',
+                'ERROR_COOKIE_OR_SIGNATURE_INVALID',
+                'COOKIE_MISSING_FIELDS',
+                'COOKIE_EXPIRED'
+            ].includes(exception)) {
+                res.writeHead(401);
+                res.end(exception);
+                return;
+            }
+            if ([
+                'BOOK_MISSING_FIELDS',
+                'USER_NOT_FOUND'
+            ].includes(exception)) {
+                res.writeHead(400);
+                res.end(exception);
+                return;
+            }
+            if ([
+                'USER_NOT_ADMIN'
+            ].includes(exception)) {
+                res.writeHead(403);
+                res.end(exception);
+                return;
+            }
+            res.writeHead(500);
+            res.end(exception);
+
+        }
     })
 
 })
 app.patch('/books/update*', function (req, res) {
     console.log('books update');
-    let bookData = "";
+    let postData = "";
     req.on('data', (chunk) => {
-        bookData += chunk.toString();
+        postData += chunk.toString();
     });
-    req.on('end', () => {
+    req.on('end', async () => {
         try {
-            let cookie = req.headers.cookie.slice(6);
-            let uuid = req.url.substring(14, 50);
-            console.log(uuid);
-            console.log(bookData);
-            let book = JSON.parse(bookData);
-            try {
+            console.log('Starting books update procedure');
+            let conn = await mariadb.createConnection(databaseCredential); await conn.query('USE ' + databaseCredential.database);
+            let user = await getUserFromCookie(req.cookies['token']);
+            if (!user.authenticated) throw 'UNAUTHORIZED';
+            if (!user.admin) throw 'USER_NOT_ADMIN';
 
-                let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
-                try {
+            let book = JSON.parse(postData);
 
-                    console.log(book);
-                    if (!uuid || !book.title || !book.author || !book.isbn || !book.description) throw 'INVALID_BOOK';
-                    if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
-                    if (decodedCookie.exp < Date.now()) throw 'COOKIE_EXPIRED';
-                    if (decodedCookie.admin !== true) throw 'USER_NOT_ADMIN';
+            if (
+                !book.title ||
+                !book.author ||
+                !book.description ||
+                !book.isbn
+            ) throw 'BOOK_MISSING_FIELDS';
+
+
+            let uuid = (req.url + new Array(50).join('X')).substring(14, 50); //pad to avoid exception
+
+            let bookSearchResult = await conn.query('SELECT * FROM books WHERE uuid=?', [uuid]);
+            if (bookSearchResult.length == 0) throw 'BOOK_NOT_FOUND';
+            let currentlyRentedBy = bookSearchResult[0].rentedby;
+
+            if (book.rentedby) {
+                let userSearch = await conn.query('SELECT * FROM users WHERE uuid=?', [book.rentedby]);
+                if (userSearch.length == 0) throw 'USER_NOT_FOUND';
+                let user = userSearch[0];
+
+                if (currentlyRentedBy) {
+                    let userListCurrentlyRentedBy = await conn.query('SELECT * FROM users WHERE uuid=?', [currentlyRentedBy]);
+                    let list = JSON.parse(userListCurrentlyRentedBy[0].rented);
+                    list = list.filter(function (value, index, arr) {
+                        return value != uuid;
+                    });
+                    await conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(list), currentlyRentedBy]);
+                    await conn.query('UPDATE books SET rentedby=NULL WHERE uuid=?', [uuid]);
                 }
-                catch (ex) {
-                    console.log(ex);
-                    res.writeHead(400);
-                    res.end(JSON.stringify({ error: ex }));
-                    return;
-                }
 
-                console.log('Connecting to database'); pool.getConnection().then(conn => {
-                    conn.query('USE ' + databaseCredential.database).then(() => {
-                        try {
-                            conn.query('SELECT * FROM books WHERE uuid=?', [uuid]).then(response => {
-                                if (response.length == 1) {
-                                    let oldBook = response[0];
-                                    let rentedby = book.rentedby;
-                                    console.log(oldBook);
-                                    if (book.rentedby)
-                                        conn.query('SELECT * FROM users WHERE uuid=?', [book.rentedby]).then(response => {
-                                            if (response.length == 0) throw 'USER_NOT_FOUND';
-
-                                            if (oldBook.rentedby) {
-                                                conn.query('SELECT rented FROM users WHERE uuid=?', [oldBook.rentedby]).then(response => {
-                                                    if (response.length == 0) throw 'USER_NOT_FOUND';
-                                                    let rentedList = JSON.parse(response[0].rented);
-                                                    console.log(rentedList);
-                                                    for (let i = 0; i < rentedList.length; i++)
-                                                        if (rentedList[i] == uuid)
-                                                            rentedList.splice(i, 1);
-                                                    console.log(rentedList);
-                                                    conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(rentedList), oldBook.rentedby]).catch(exception => {
-                                                        console.log(exception);
-                                                        res.writeHead(400);
-                                                        console.log('Releasing connection'); conn.release(); conn.close();
-                                                        res.end(JSON.stringify({ error: exception }));
-                                                    })
-                                                }).catch(exception => {
-                                                    console.log(exception);
-                                                    res.writeHead(400);
-                                                    console.log('Releasing connection'); conn.release(); conn.close();
-                                                    res.end(JSON.stringify({ error: exception }));
-                                                })
-                                            }
-                                            conn.query('UPDATE books SET rentedby=? WHERE uuid=?', [rentedby, uuid]).then(() => {
-                                                conn.query('SELECT rented FROM users WHERE uuid=?', [rentedby]).then(response => {
-                                                    let list = JSON.parse(response[0].rented);
-                                                    list.push(uuid);
-                                                    conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(list), rentedby]).then(() => {
-                                                        conn.query('UPDATE books SET title=?, author=?, isbn=?, description=? WHERE uuid=?',
-                                                            [book.title, book.author, book.isbn, book.description, uuid]
-                                                        ).then(() => {
-                                                            broadcastUpdate();
-                                                            res.writeHead(200);
-                                                            console.log('Releasing connection'); conn.release(); conn.close();
-                                                            res.end();
-                                                            return;
-                                                        })
-
-
-
-                                                    })
-                                                })
-                                            })
-                                            //now rent the book
-                                        }).catch(exception => {
-                                            console.log(exception);
-                                            res.writeHead(400);
-                                            console.log('Releasing connection'); conn.release(); conn.close();
-                                            res.end(JSON.stringify({ error: exception }));
-                                        })
-                                    else {
-                                        if (oldBook.rentedby) {
-                                            conn.query('SELECT rented FROM users WHERE uuid=?', [oldBook.rentedby]).then(response => {
-                                                if (response.length == 0) throw 'USER_NOT_FOUND';
-                                                let rentedList = JSON.parse(response[0].rented);
-                                                console.log(rentedList);
-                                                for (let i = 0; i < rentedList.length; i++)
-                                                    if (rentedList[i] == uuid)
-                                                        rentedList.splice(i, 1);
-                                                console.log(rentedList);
-                                                conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(rentedList), oldBook.rentedby]).then(() => {
-                                                    conn.query('UPDATE books SET title=?, author=?, isbn=?, description=?, rentedby=NULL WHERE uuid=?',
-                                                        [book.title, book.author, book.isbn, book.description, uuid]
-                                                    ).then(() => {
-                                                        broadcastUpdate();
-                                                        res.writeHead(200);
-                                                        console.log('Releasing connection'); conn.release(); conn.close();
-                                                        res.end();
-                                                        return;
-                                                    })
-                                                }).catch(exception => {
-                                                    console.log(exception);
-                                                    res.writeHead(400);
-                                                    console.log('Releasing connection'); conn.release(); conn.close();
-                                                    res.end(JSON.stringify({ error: exception }));
-                                                })
-                                            }).catch(exception => {
-                                                console.log(exception);
-                                                res.writeHead(400);
-                                                console.log('Releasing connection'); conn.release(); conn.close();
-                                                res.end(JSON.stringify({ error: exception }));
-                                            })
-                                        } else conn.query('UPDATE books SET title=?, author=?, isbn=?, description=? WHERE uuid=?',
-                                            [book.title, book.author, book.isbn, book.description, uuid]
-                                        ).then(() => {
-                                            broadcastUpdate();
-                                            res.writeHead(200);
-                                            console.log('Releasing connection'); conn.release(); conn.close();
-                                            res.end();
-                                            return;
-                                        })
-
-                                    }
-                                } else throw 'BOOK_DOES_NOT_EXIST';
-                            }).catch(exception => {
-                                console.log(exception);
-                                res.writeHead(400);
-                                console.log('Releasing connection'); conn.release(); conn.close();
-                                res.end(JSON.stringify({ error: exception }));
-                            })
-
-                        } catch (ex) {
-                            console.log(ex);
-                        }
-                    }).catch(eex => {
-                        console.log(ex);
-                    })
-
+                let list = JSON.parse(user.rented);
+                list.push(uuid);
+                await conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(list), user.uuid]);
+                await conn.query('UPDATE books SET rentedby=? WHERE uuid=?', [user.uuid, uuid]);
+            }
+            else if (currentlyRentedBy) {
+                let userListCurrentlyRentedBy = await conn.query('SELECT * FROM users WHERE uuid=?', [currentlyRentedBy]);
+                let list = JSON.parse(userListCurrentlyRentedBy[0].rented);
+                list = list.filter(function (value, index, arr) {
+                    return value != uuid;
                 });
+                await conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(list), currentlyRentedBy]);
+                await conn.query('UPDATE books SET rentedby=NULL WHERE uuid=?', [uuid]);
+            }
+            await conn.query('UPDATE books SET title=?, author=?, isbn=?, description=? WHERE uuid=?', [book.title, book.author, book.isbn, book.description, uuid]);
 
+            broadcastUpdate();
+            conn.close();
+            res.writeHead(200);
+            res.end();
+            return;
 
-
-                console.log(decodedCookie);
-
-            } catch (ex) {
-                console.log(ex);
-                res.writeHead(400);
-                res.end(JSON.stringify({ error: ex }));
+        } catch (exception) {
+            console.log('Books update procedure failed with exception', exception);
+            if ([
+                'UNAUTHORIZED',
+                'ERROR_COOKIE_OR_SIGNATURE_INVALID',
+                'COOKIE_MISSING_FIELDS',
+                'COOKIE_EXPIRED'
+            ].includes(exception)) {
+                res.writeHead(401);
+                res.end(exception);
                 return;
             }
-        } catch (ex) {
-            console.log(ex);
-            res.writeHead(400);
-            res.end(JSON.stringify({ error: ex }));
-            return;
+            if ([
+                'BOOK_MISSING_FIELDS',
+                'USER_NOT_FOUND'
+            ].includes(exception)) {
+                res.writeHead(400);
+                res.end(exception);
+                return;
+            }
+            if ([
+                'BOOK_NOT_FOUND'
+            ].includes(exception)) {
+                res.writeHead(404);
+                res.end(exception);
+                return;
+            }
+            if ([
+                'USER_NOT_ADMIN'
+            ].includes(exception)) {
+                res.writeHead(403);
+                res.end(exception);
+                return;
+            }
+            res.writeHead(500);
+            res.end(exception);
+
         }
     })
 
 })
-app.delete('/books/delete*', function (req, res) {
-    console.log('books delete');
-
-    let cookie = req.headers.cookie.slice(6);
-    console
-    let uuid = req.url.substring(14, 50);
+app.delete('/books/delete*', async function (req, res) {
     try {
+        console.log('Starting books delete procedure');
+        let conn = await mariadb.createConnection(databaseCredential); await conn.query('USE ' + databaseCredential.database);
+        let user = await getUserFromCookie(req.cookies['token']);
+        if (!user.authenticated) throw 'UNAUTHORIZED';
+        if (!user.admin) throw 'USER_NOT_ADMIN';
 
-        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
-        try {
-            if (!uuid) throw 'INVALID_BOOK';
-            if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
-            if (decodedCookie.exp < Date.now()) throw 'COOKIE_EXPIRED';
-            if (decodedCookie.admin !== true) throw 'USER_NOT_ADMIN';
-        }
-        catch (ex) {
-            console.log(ex);
-            res.writeHead(400);
-            res.end(JSON.stringify({ error: ex }));
-            return;
-        }
+        let uuid = (req.url + new Array(50).join('X')).substring(14, 50); //pad to avoid exception
 
-        console.log('Connecting to database'); pool.getConnection().then(conn => {
-            conn.query('USE ' + databaseCredential.database).then(() => {
-                try {
-                    conn.query('SELECT * FROM books WHERE uuid=?', [uuid]).then(response => {
-                        if (response.length == 1) {
+        let bookSearchResult = await conn.query('SELECT * FROM books WHERE uuid=?', [uuid]);
+        if (bookSearchResult.length == 0) throw 'BOOK_NOT_FOUND';
+        let currentlyRentedBy = bookSearchResult[0].rentedby;
 
-                            if (response[0].rentedby) {
-                                let rentedby = response[0].rentedby;
-                                conn.query('SELECT rented FROM users WHERE uuid=?', [rentedby]).then(response => {
-                                    if (response.length == 0) throw 'USER_NOT_FOUND';
-                                    let rentedList = JSON.parse(response[0].rented);
-                                    console.log(rentedList);
-                                    for (let i = 0; i < rentedList.length; i++)
-                                        if (rentedList[i] == uuid)
-                                            rentedList.splice(i, 1);
-                                    console.log(rentedList);
-                                    conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(rentedList), decodedCookie.uuid]).then(() => {
-                                        conn.query('DELETE FROM books WHERE uuid=?', [uuid]
-                                        ).then(() => {
-                                            broadcastUpdate()
-                                            res.writeHead(200);
-                                            console.log('Releasing connection'); conn.release(); conn.close();
-                                            res.end();
-                                        }).catch(exception => {
-                                            console.log(exception);
-                                            console.log('Releasing connection'); conn.release(); conn.close();
-                                            res.writeHead(400);
-                                            console.log('Releasing connection'); conn.release(); conn.close();
-                                            res.end(JSON.stringify({ error: exception }));
-                                        })
-                                    })
-                                })
-
-
-
-                            } else
-                                conn.query('DELETE FROM books WHERE uuid=?', [uuid]
-                                ).then(response => {
-                                    broadcastUpdate()
-                                    res.writeHead(200);
-                                    console.log('Releasing connection'); conn.release(); conn.close();
-                                    res.end();
-                                }).catch(exception => {
-                                    console.log(exception);
-                                    console.log('Releasing connection'); conn.release(); conn.close();
-                                    res.writeHead(400);
-                                    res.end(JSON.stringify({ error: exception }));
-                                })
-                        } else throw 'BOOK_DOES_NOT_EXIST';
-                    }).catch(exception => {
-                        console.log(exception);
-                        res.writeHead(400);
-                        console.log('Releasing connection'); conn.release(); conn.close();
-                        res.end(JSON.stringify({ error: exception }));
-                    })
-
-                } catch (ex) {
-                    console.log(ex);
-                }
-            }).catch(err => {
-
-            })
-
-        });
-
-
-
-        console.log(decodedCookie);
-
-    } catch (ex) {
-        console.log(ex);
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: ex }));
-        return;
-    }
-
-
-
-
-})
-app.get('/books/search*', function (req, res) {
-    console.log('books search');
-    res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    let cookie = req.headers.cookie.slice(6);
-
-    let search = '%' + new URL('https://library.karol.gay' + req.url).searchParams.get('query') + '%';
-    console.log(search);
-    try {
-        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
-        try {
-            if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
-            if (decodedCookie.exp < Date.now()) throw 'COOKIE_EXPIRED';
-        }
-        catch (ex) {
-            console.log(ex);
-            res.writeHead(400);
-            res.end(JSON.stringify({ error: ex }));
-            return;
-        }
-        let isUserAdmin = decodedCookie.admin === true;
-
-        console.log('Connecting to database'); pool.getConnection().then(conn => {
-            conn.query('USE ' + databaseCredential.database).then(() => {
-                conn.query('SELECT * FROM books WHERE CONCAT(title, author, isbn, description) LIKE ? ORDER BY title', [search]).then(response => {
-                    let booksList = [];
-                    for (let i = 0; i < response.length; i++) {
-                        response[i].availableToRent = response[i].rentedby == null;
-                        response[i].rentedByYou = response[i].rentedby == decodedCookie.uuid;
-                        if (!isUserAdmin) delete response[i].rentedby;
-
-
-                        booksList.push(response[i]);
-                    }
-                    res.writeHead(200);
-                    console.log('Releasing connection'); conn.release(); conn.close();
-                    res.end(JSON.stringify(booksList));
-                }).catch(ex => {
-                    console.log(ex);
-                    res.writeHead(400);
-                    console.log('Releasing connection'); conn.release(); conn.close();
-                    res.end(JSON.stringify({ error: ex }));
-                    return;
-
-                });
-
-            }).catch(ex => {
-                console.log(ex);
-                res.writeHead(400);
-                console.log('Releasing connection'); conn.release(); conn.close();
-                res.end(JSON.stringify({ error: ex }));
-                return;
-            })
-
-        });
-
-
-
-        console.log(decodedCookie);
-
-    } catch (ex) {
-        console.log(ex);
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: ex }));
-        return;
-    }
-
-
-
-
-
-})
-app.get('/resetdevice*', function (req, res) {
-    console.log('resetdevice');
-    let id = new URL('https://library.karol.gay' + req.url).searchParams.get('token');
-    console.log(id);
-
-    console.log('Connecting to database'); pool.getConnection().then(conn => {
-        conn.query('USE ' + databaseCredential.database).then(() => {
-
-            conn.query('SELECT url FROM redirect WHERE id=?', [id]).then(response => {
-                if (response.length == 0) {
-                    res.redirect('https://library.karol.gay/');
-                    console.log('Releasing connection'); conn.release(); conn.close();
-                    res.end();
-                }
-                else {
-
-                    let url = response[0].url;
-                    console.log(url);
-                    res.redirect(url);
-                    console.log('Releasing connection'); conn.release(); conn.close();
-                    res.end();
-                }
-
-
-            })
-        })
-
-    });
-
-});
-app.get('/users/get*', function (req, res) {
-    console.log('users get');
-    res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    try {
-        let cookie = req.headers.cookie.slice(6);
-        try {
-
-            let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
-            try {
-
-                if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
-                if (decodedCookie.exp < Date.now()) throw 'COOKIE_EXPIRED';
-                if (decodedCookie.admin !== true) throw 'USER_NOT_ADMIN';
-            }
-            catch (ex) {
-                console.log(ex);
-                res.writeHead(400);
-                res.end(JSON.stringify({ error: ex }));
-                return;
-            }
-
-            console.log('Connecting to database'); pool.getConnection().then(conn => {
-                conn.query('USE ' + databaseCredential.database).then(() => {
-                    try {
-                        conn.query('SELECT uuid, name, admin, email, rented FROM users').then(response => {
-                            let userList = [];
-                            for (let i = 0; i < response.length; i++)userList.push({
-                                uuid: response[i].uuid,
-                                name: response[i].name,
-                                email: response[i].email,
-                                admin: response[i].admin == 1,
-                                rented: JSON.parse(response[i].rented)
-                            });
-
-                            res.writeHead(200);
-                            console.log('Releasing connection'); conn.release(); conn.close();
-                            res.end(JSON.stringify(userList));
-                        }).catch(exception => {
-                            console.log(exception);
-                            res.writeHead(400);
-                            console.log('Releasing connection'); conn.release(); conn.close();
-                            res.end(JSON.stringify({ error: exception }));
-                        })
-
-                    } catch (ex) {
-                        console.log(ex);
-                    }
-                }).catch(err => {
-
-                })
-
+        if (currentlyRentedBy) {
+            let userListCurrentlyRentedBy = await conn.query('SELECT * FROM users WHERE uuid=?', [currentlyRentedBy]);
+            let list = JSON.parse(userListCurrentlyRentedBy[0].rented);
+            list = list.filter(function (value, index, arr) {
+                return value != uuid;
             });
+            await conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(list), currentlyRentedBy]);
+        }
+        await conn.query('DELETE FROM books WHERE uuid=?', [uuid]);
 
+        broadcastUpdate();
+        conn.close();
+        res.writeHead(200);
+        res.end();
+        return;
 
-
-            console.log(decodedCookie);
-
-        } catch (ex) {
-            console.log(ex);
-            res.writeHead(400);
-            res.end(JSON.stringify({ error: ex }));
+    } catch (exception) {
+        console.log('Books delete procedure failed with exception', exception);
+        if ([
+            'UNAUTHORIZED',
+            'ERROR_COOKIE_OR_SIGNATURE_INVALID',
+            'COOKIE_MISSING_FIELDS',
+            'COOKIE_EXPIRED'
+        ].includes(exception)) {
+            res.writeHead(401);
+            res.end(exception);
             return;
         }
-    } catch (ex) {
-        console.log(ex);
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: ex }));
-        return;
+        if ([
+            'BOOK_NOT_FOUND'
+        ].includes(exception)) {
+            res.writeHead(404);
+            res.end(exception);
+            return;
+        }
+        if ([
+            'USER_NOT_ADMIN'
+        ].includes(exception)) {
+            res.writeHead(403);
+            res.end(exception);
+            return;
+        }
+        res.writeHead(500);
+        res.end(exception);
+
     }
+})
+app.get('/books/search*', async function (req, res) {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    try {
+        console.log('Starting books search procedure');
+        let conn = await mariadb.createConnection(databaseCredential); await conn.query('USE ' + databaseCredential.database);
+        let user = await getUserFromCookie(req.cookies['token']);
+        if (!user.authenticated) throw 'UNAUTHORIZED';
+        let search = '%' + ((new URL('https://library.karol.gay' + req.url).searchParams.get('query')) || '') + '%';
+        console.log('Searching books for', search);
+
+        let books = await conn.query('SELECT * FROM books WHERE CONCAT(title, author, isbn, description) LIKE ? ORDER BY title', [search]);
+        let booksList = [];
+        for (let i = 0; i < books.length; i++) {
+            books[i].availableToRent = books[i].rentedby == null;
+            books[i].rentedByYou = books[i].rentedby == user.uuid;
+            if (!user.admin) delete books[i].rentedby;
+            booksList.push(books[i]);
+        }
+        conn.close();
+        res.writeHead(200);
+        res.end(JSON.stringify(booksList));
+    } catch (exception) {
+        console.log('Books search procedure failed with exception', exception);
+        if ([
+            'UNAUTHORIZED',
+            'ERROR_COOKIE_OR_SIGNATURE_INVALID',
+            'COOKIE_MISSING_FIELDS',
+            'COOKIE_EXPIRED'
+        ].includes(exception)) {
+            res.writeHead(401);
+            res.end(exception);
+            return;
+        }
+        res.writeHead(500);
+        res.end(exception);
+
+    }
+})
+
+//USERS
+app.get('/users/get*', async function (req, res) {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    try {
+        console.log('Starting users get procedure');
+        let conn = await mariadb.createConnection(databaseCredential); await conn.query('USE ' + databaseCredential.database);
+        let user = await getUserFromCookie(req.cookies['token']);
+        if (!user.authenticated) throw 'UNAUTHORIZED';
+        if (!user.admin) throw 'USER_NOT_ADMIN';
+        if (req.url == '/users/get') {
+            let usersResponse = await conn.query('SELECT * FROM users');
+            let userList = [];
+            for (let i = 0; i < usersResponse.length; i++)userList.push({
+                uuid: usersResponse[i].uuid,
+                name: usersResponse[i].name,
+                email: usersResponse[i].email,
+                admin: usersResponse[i].admin == 1,
+                rented: JSON.parse(usersResponse[i].rented)
+            });
+            res.writeHead(200);
+            res.end(JSON.stringify(userList));
 
 
+        } else {
+            let uuid = (req.url + new Array(50).join('X')).substring(11, 47); //pad to avoid exception
+            let usersResponse = await conn.query('SELECT * FROM users WHERE uuid=?', [uuid]);
+            if (usersResponse.length == 0) throw 'USER_NOT_FOUND';
+            let user = {
+                uuid: usersResponse[0].uuid,
+                name: usersResponse[0].name,
+                email: usersResponse[0].email,
+                admin: usersResponse[0].admin == 1,
+                rented: JSON.parse(usersResponse[0].rented)
+            }
+            conn.close();
+            res.writeHead(200);
+            res.end(JSON.stringify(user));
+        }
+    } catch (exception) {
+        console.log('Users get procedure failed with exception', exception);
+        if ([
+            'UNAUTHORIZED',
+            'ERROR_COOKIE_OR_SIGNATURE_INVALID',
+            'COOKIE_MISSING_FIELDS',
+            'COOKIE_EXPIRED'
+        ].includes(exception)) {
+            res.writeHead(401);
+            res.end(exception);
+            return;
+        }
+        if ([
+            'USER_NOT_FOUND'
+        ].includes(exception)) {
+            res.writeHead(404);
+            res.end(exception);
+            return;
+        }
+        if ([
+            'USER_NOT_ADMIN'
+        ].includes(exception)) {
+            res.writeHead(403);
+            res.end(exception);
+            return;
+        }
+        res.writeHead(500);
+        res.end(exception);
+
+    }
 
 });
-app.post('/rental/rent*', function (req, res) {
-    console.log('rental rent');
-    let cookie = req.headers.cookie.slice(6);
 
-    let uuid = req.url.substring(13, 49);
-    console.log(uuid);
-    try {
-        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
-        try {
-            if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
-            if (decodedCookie.exp < Date.now()) throw 'COOKIE_EXPIRED';
-        }
-        catch (ex) {
-            console.log(ex);
-            res.writeHead(400);
-            res.end(JSON.stringify({ error: ex }));
-            return;
-        }
-
-        console.log('Connecting to database'); pool.getConnection().then(conn => {
-            conn.query('USE ' + databaseCredential.database).then(() => {
-                conn.query('SELECT rentedby FROM books WHERE uuid=?', [uuid]).then(response => {
-                    if (response.length == 0) throw 'BOOK_NOT_FOUND';
-                    if (response[0].rentedby == null) {
-                        //rent a book;
-                        conn.query('UPDATE books SET rentedby=? WHERE uuid=?', [decodedCookie.uuid, uuid]).then(() => {
-                            conn.query('SELECT rented FROM users WHERE uuid=?', [decodedCookie.uuid]).then(response => {
-                                if (response.length == 0) throw 'USER_NOT_FOUND';
-
-                                let rentedList = JSON.parse(response[0].rented);
-                                console.log(rentedList);
-                                rentedList.push(uuid);
-                                console.log(rentedList);
-                                conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(rentedList), decodedCookie.uuid]).then(response => {
-
-                                    broadcastUpdate();
-                                    res.writeHead(200);
-                                    console.log('Releasing connection'); conn.release(); conn.close();
-                                    res.end();
-                                })
-                            })
-                        })
-
-                    } else if (response[0].rentedby == decodedCookie.uuid) throw 'BOOK_RENTED_BY_YOU'; else throw 'BOOK_RENTED_BY_ANOTHER_USER';
-
-                }).catch(ex => {
-                    console.log(ex);
-                    res.writeHead(400);
-                    console.log('Releasing connection'); conn.release(); conn.close();
-                    res.end(JSON.stringify({ error: ex }));
-                    return;
-
-                });
-            }).catch(err => {
-                console.log(ex);
-                res.writeHead(400);
-                console.log('Releasing connection'); conn.release(); conn.close();
-                res.end(JSON.stringify({ error: ex }));
-                return;
-            })
-
-        });
-    } catch (ex) {
-        console.log(ex);
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: ex }));
-        return;
-    }
-
-})
-app.post('/rental/return*', function (req, res) {
-    console.log('rental return');
-    let cookie = req.headers.cookie.slice(6);
-
-    let uuid = req.url.substring(15, 51);
-    console.log(uuid);
-    console.log(uuid);
-    try {
-        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
-        try {
-            if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
-            if (decodedCookie.exp < Date.now()) throw 'COOKIE_EXPIRED';
-        }
-        catch (ex) {
-            console.log(ex);
-            res.writeHead(400);
-            res.end(JSON.stringify({ error: ex }));
-            return;
-        }
-
-        console.log('Connecting to database'); pool.getConnection().then(conn => {
-            conn.query('USE ' + databaseCredential.database).then(() => {
-                conn.query('SELECT rentedby FROM books WHERE uuid=?', [uuid]).then(response => {
-
-                    if (response.length == 0) throw 'BOOK_NOT_FOUND';
-                    if (response[0].rentedby == decodedCookie.uuid) {
-                        //return a book;
-                        conn.query('UPDATE books SET rentedby=null WHERE uuid=?', [uuid]).then(() => {
-                            conn.query('SELECT rented FROM users WHERE uuid=?', [decodedCookie.uuid]).then(response => {
-                                if (response.length == 0) throw 'USER_NOT_FOUND';
-
-                                let rentedList = JSON.parse(response[0].rented);
-                                console.log(rentedList);
-                                for (let i = 0; i < rentedList.length; i++)
-                                    if (rentedList[i] == uuid)
-                                        rentedList.splice(i, 1);
-                                console.log(rentedList);
-                                conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(rentedList), decodedCookie.uuid]).then(response => {
-
-                                    broadcastUpdate();
-                                    res.writeHead(200);
-                                    console.log('Releasing connection'); conn.release(); conn.close();
-                                    res.end();
-                                })
-                            })
-                        })
-
-                    } else if (response[0].rentedby == null) throw 'BOOK_NOT_RENTED'; else throw 'BOOK_RENTED_BY_ANOTHER_USER';
-
-                }).catch(ex => {
-                    console.log(ex);
-                    res.writeHead(400);
-                    console.log('Releasing connection'); conn.release(); conn.close();
-                    res.end(JSON.stringify({ error: ex }));
-                    return;
-
-                });
-            }).catch(err => {
-                console.log(ex);
-                res.writeHead(400);
-                console.log('Releasing connection'); conn.release(); conn.close();
-                res.end(JSON.stringify({ error: ex }));
-                return;
-            })
-
-        });
-    } catch (ex) {
-        console.log(ex);
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: ex }));
-        return;
-    }
-
-
-})
-app.get('/rental/get', function (req, res) {
-    console.log('rental rent');
+//RENTAL
+app.get('/rental/get', async function (req, res) {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    let cookie = req.headers.cookie.slice(6);
-
     try {
-        let decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
-        try {
-            if (decodedCookie.iss != 'library.karol.gay' || decodedCookie.kind != 'trust-cookie') throw 'INVALID_COOKIE';
-            if (decodedCookie.exp < Date.now()) throw 'COOKIE_EXPIRED';
-        }
-        catch (ex) {
-            console.log(ex);
-            res.writeHead(400);
-            res.end(JSON.stringify({ error: ex }));
+        console.log('Starting rental get procedure');
+        let conn = await mariadb.createConnection(databaseCredential); await conn.query('USE ' + databaseCredential.database);
+        let user = await getUserFromCookie(req.cookies['token']);
+        if (!user.authenticated) throw 'UNAUTHORIZED';
+
+        let rentedList = await conn.query('SELECT uuid, title, author, isbn, description FROM books WHERE rentedby=?', [user.uuid]);
+        let list = [];
+        for (let i = 0; i < rentedList.length; i++)
+            list.push(rentedList[i]);
+        conn.close();
+        res.writeHead(200);
+        res.end(JSON.stringify(list));
+        return;
+    } catch (exception) {
+        console.log('Rental get procedure failed with exception', exception);
+        if ([
+            'UNAUTHORIZED',
+            'ERROR_COOKIE_OR_SIGNATURE_INVALID',
+            'COOKIE_MISSING_FIELDS',
+            'COOKIE_EXPIRED'
+        ].includes(exception)) {
+            res.writeHead(401);
+            res.end(exception);
             return;
         }
-        let isUserAdmin = decodedCookie.admin === true;
+        res.writeHead(500);
+        res.end(exception);
 
-        console.log('Connecting to database'); pool.getConnection().then(conn => {
-            conn.query('USE ' + databaseCredential.database).then(() => {
-                conn.query('SELECT * FROM books WHERE rentedby=?', [decodedCookie.uuid]).then(response => {
+    }
+})
+app.post('/rental/rent*', async function (req, res) {
+    try {
+        console.log('Starting rental rent procedure');
+        let conn = await mariadb.createConnection(databaseCredential); await conn.query('USE ' + databaseCredential.database);
+        let user = await getUserFromCookie(req.cookies['token']);
+        if (!user.authenticated) throw 'UNAUTHORIZED';
 
-                    let booksList = [];
-                    for (let i = 0; i < response.length; i++) {
-                        if (!isUserAdmin) delete response[i].rentedby;
+        let uuid = (req.url + new Array(50).join('X')).substring(13, 49);
 
+        let bookQueryResult = await conn.query('SELECT * FROM books WHERE uuid=?', [uuid]);
+        if (bookQueryResult.length == 0) throw 'BOOK_NOT_FOUND';
 
-                        booksList.push(response[i]);
-                    }
-                    console.log(booksList);
-                    res.writeHead(200);
-                    console.log('Releasing connection'); conn.release(); conn.close();
-                    res.end(JSON.stringify(booksList));
-                }).catch(ex => {
-                    console.log(ex);
-                    res.writeHead(400);
-                    console.log('Releasing connection'); conn.release(); conn.close();
-                    res.end(JSON.stringify({ error: ex }));
-                    return;
+        let book = bookQueryResult[0];
 
-                });
+        if (book.rentedby && book.rentedby != user.uuid) throw 'BOOK_UNAVAILABLE';
+        if (book.rentedby == user.uuid) throw 'BOOK_ALREADY_RENTED_BY_YOU';
 
-            }).catch(ex => {
-                console.log(ex);
-                res.writeHead(400);
-                console.log('Releasing connection'); conn.release(); conn.close();
-                res.end(JSON.stringify({ error: ex }));
-                return;
-            })
+        let userQueryResult = await conn.query('SELECT rented FROM users WHERE uuid=?', [user.uuid]);
+        if (userQueryResult.length == 0) throw 'USER_NOT_FOUND';
 
-        });
+        let userList = JSON.parse(userQueryResult[0].rented);
 
+        userList.push(uuid);
 
+        await conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(userList), user.uuid]);
+        await conn.query('UPDATE books SET rentedby=? WHERE uuid=?', [user.uuid, uuid]);
 
-        console.log(decodedCookie);
-
-    } catch (ex) {
-        console.log(ex);
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: ex }));
+        conn.close();
+        broadcastUpdate();
+        res.writeHead(200);
+        res.end();
         return;
+    } catch (exception) {
+        console.log('Rental rent procedure failed with exception', exception);
+        if ([
+            'UNAUTHORIZED',
+            'ERROR_COOKIE_OR_SIGNATURE_INVALID',
+            'COOKIE_MISSING_FIELDS',
+            'COOKIE_EXPIRED'
+        ].includes(exception)) {
+            res.writeHead(401);
+            res.end(exception);
+            return;
+        }
+        if ([
+            'BOOK_NOT_FOUND'
+        ].includes(exception)) {
+            res.writeHead(404);
+            res.end(exception);
+            return;
+        }
+        if ([
+            'BOOK_UNAVAILABLE',
+            'BOOK_ALREADY_RENTED_BY_YOU',
+            'USER_NOT_FOUND'
+        ].includes(exception)) {
+            res.writeHead(400);
+            res.end(exception);
+            return;
+        }
+        res.writeHead(500);
+        res.end(exception);
+
     }
 
-
-
-
-
 })
+app.post('/rental/return*', async function (req, res) {
+    try {
+        console.log('Starting rental return procedure');
+        let conn = await mariadb.createConnection(databaseCredential); await conn.query('USE ' + databaseCredential.database);
+        let user = await getUserFromCookie(req.cookies['token']);
+        if (!user.authenticated) throw 'UNAUTHORIZED';
+
+        let uuid = (req.url + new Array(50).join('X')).substring(15, 51);
+
+        let bookQueryResult = await conn.query('SELECT * FROM books WHERE uuid=?', [uuid]);
+        if (bookQueryResult.length == 0) throw 'BOOK_NOT_FOUND';
+
+        let book = bookQueryResult[0];
+
+        if (book.rentedby && book.rentedby != user.uuid) throw 'BOOK_RENTED_BY_ANOTHER_USER';
+        if (!book.rentedby) throw 'BOOK_NOT_RENTED';
+
+        let userQueryResult = await conn.query('SELECT rented FROM users WHERE uuid=?', [user.uuid]);
+        if (userQueryResult.length == 0) throw 'USER_NOT_FOUND';
+
+        let userList = JSON.parse(userQueryResult[0].rented);
+
+        userList = userList.filter(function (value, index, arr) {
+            return value != uuid;
+        });
+
+        await conn.query('UPDATE users SET rented=? WHERE uuid=?', [JSON.stringify(userList), user.uuid]);
+        await conn.query('UPDATE books SET rentedby=NULL WHERE uuid=?', [uuid]);
+
+        conn.close();
+        broadcastUpdate();
+        res.writeHead(200);
+        res.end();
+        return;
+    } catch (exception) {
+        console.log('Rental return procedure failed with exception', exception);
+        if ([
+            'UNAUTHORIZED',
+            'ERROR_COOKIE_OR_SIGNATURE_INVALID',
+            'COOKIE_MISSING_FIELDS',
+            'COOKIE_EXPIRED'
+        ].includes(exception)) {
+            res.writeHead(401);
+            res.end(exception);
+            return;
+        }
+        if ([
+            'BOOK_NOT_FOUND'
+        ].includes(exception)) {
+            res.writeHead(404);
+            res.end(exception);
+            return;
+        }
+        if ([
+            'BOOK_RENTED_BY_ANOTHER_USER',
+            'BOOK_NOT_RENTED',
+            'USER_NOT_FOUND'
+        ].includes(exception)) {
+            res.writeHead(400);
+            res.end(exception);
+            return;
+        }
+        res.writeHead(500);
+        res.end(exception);
+
+    }
+})
+
+//UPDATES
+let updatesClientsList = [];
 wssUpdates.on("connection", ws => {
-    console.log('update connection');
+    console.log('New client connected to updates channel.');
     updatesClientsList.push(ws);
-    console.log('Updates connected:', updatesClientsList.length);
+    console.log('Updates currently connected:', updatesClientsList.length);
     ws.on("close", () => {
+        console.log('User disconnected from updates channel');
         for (var i = 0; i < updatesClientsList.length; i++) {
             if (updatesClientsList[i] === ws) {
                 updatesClientsList.splice(i, 1);
                 i--;
             }
         }
+        console.log('Updates currently connected:', updatesClientsList.length);
     })
 });
-
-function validateEmail(email) {
-    console.log('valudate email');
-    return String(email)
-        .toLowerCase()
-        .match(
-            /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/
-        );
-};
-function createAccount(mail) {
-    console.log('create account');
-    console.log('Connecting to database'); pool.getConnection().then(conn => {
-        conn.query('USE ' + databaseCredential.database).then(() => {
-            let uuid = getUuid(mail);
-            conn.query("INSERT INTO users (uuid, admin, email) VALUES (?, ?, ?)", [uuid, false, mail]).then(res => {
-
-                console.log('Releasing connection'); conn.release(); conn.close();
-
-                broadcastUpdate();
-            }).catch(err => {
-                console.log('Releasing connection'); conn.release(); conn.close();
-                console.log(err);
-            })
-            sendKeyRegistrationMail(mail);
-        }).catch(err => {
-            console.log('Releasing connection'); conn.release(); conn.close();
-            console.log(err);
-        })
-
-    });
-}
-async function sendKeyRegistrationMail(mail) {
-    console.log('send email');
-
-    console.log('Connecting to database'); pool.getConnection().then(conn => {
-        conn.query('USE ' + databaseCredential.database).then(() => {
-            conn.query("SELECT * FROM users WHERE email=?", [mail]).then(async res => {
-
-                let user = res[0];
-                console.log(user);
-                var nonce = "";
-                const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-                for (var i = 0; i < 64; i++)
-                    nonce += possible.charAt(Math.floor(Math.random() * possible.length));
-
-                const claims = {
-                    iss: "library.karol.gay",
-                    kind: "key-reset",
-
-                    nonce: nonce,
-
-                    iat: Date.now(),
-                    exp: Date.now() + 900000,
-
-                    name: user.name || user.email,
-                    mail: user.email,
-                    uuid: user.uuid,
-                    admin: user.admin == 1
-
-                }
-                const token = jwt.sign(claims, privkey, { algorithm: 'PS512' });
-                const url = createRedirect('https://library.karol.gay/keyreset.html?token=' + token);
-
-                let transporter = nodemailer.createTransport({
-                    host: "in-v3.mailjet.com",
-                    port: 587,
-                    secure: false,
-                    auth: require('./smtp.json')
-                });
-
-                let messageText = fs.readFileSync(__dirname + '/mail.txt').toString();
-                let messageHtml = fs.readFileSync(__dirname + '/mail.html').toString();
-
-                let message = {
-                    from: '"Library 📖" <library@karol.gay>',
-                    to: claims.mail,
-                    subject: 'Register new device with your account',
-                    text: messageText.replaceAll('{{name}}', claims.name).replaceAll('{{action_url}}', url),
-                    html: messageHtml.replaceAll('{{name}}', claims.name).replaceAll('{{action_url}}', url),
-                    attachments: []
-                };
-
-                try {
-                    await transporter.sendMail(message);
-                    console.log('Releasing connection'); conn.release(); conn.close();
-                } catch (ex) {
-                    console.log(ex);
-                    console.log('Releasing connection'); conn.release(); conn.close();
-                }
-
-            }).catch(err => {
-                console.log('A', err);
-                console.log('Releasing connection'); conn.release(); conn.close();
-            })
-
-        }).catch(err => {
-            console.log('B', err);
-            console.log('Releasing connection'); conn.release(); conn.close();
-        })
-
-    });
-
-
-
-
-
-
-
-
-
-
-}
-function decodeAuthData(authData) {
-    console.log('decode auth data');
-    let FLAG_UP = 0x01; // Flag for userPresence
-    let FLAG_UV = 0x04; // Flag for userVerification
-    let FLAG_AT = 0x40; // Flag for attestedCredentialData
-    let FLAG_ED = 0x80; // Flag for extensions
-
-    let rpIdHash = authData.slice(0, 32);
-    let flags = authData.slice(32, 33)[0];
-    let signCount = authData.slice(33, 37);
-
-    if ((flags & FLAG_AT) === 0x00) {
-        // no attestedCredentialData
-        return {
-            rpIdHash: rpIdHash,
-            flags: flags,
-            signCount: signCount
-        }
-    }
-
-    if (authData.length < 38) {
-        // attestedCredentialData missing
-        throw 'invalid authData.length';
-    }
-
-    let aaguid = authData.slice(37, 53);
-    let credentialIdLength = (authData[53] << 8) + authData[54]; //16-bit unsigned big-endian integer
-    let credenitalId = authData.slice(55, 55 + credentialIdLength);
-    let credentialPublicKey = this.decodeCredentialPublicKey(authData.slice(55 + credentialIdLength));
-
-    /* decoding extensions - not implemented */
-
-    return {
-        rpIdHash: rpIdHash,
-        flags: flags,
-        signCount: signCount,
-        attestedCredentialData: {
-            aaguid: aaguid,
-            credentialId: credenitalId,
-            credentialPublicKey: credentialPublicKey
-        }
-    }
-}
-function createRedirect(url) {
-    console.log('create url');
-    let id = crypto.createHash('sha256').update(url).digest('hex');
-
-    console.log('Connecting to database'); pool.getConnection().then(conn => {
-        conn.query('USE ' + databaseCredential.database).then(() => {
-
-            conn.query('INSERT INTO redirect (id, url) VALUES (?, ?)', [id, url]);
-        })
-
-    });
-    return 'https://library.karol.gay/resetdevice?token=' + id;
-}
 function broadcastUpdate() {
-    console.log('broadcast update');
+    console.log('Broadcasting update to all users');
     updatesClientsList.forEach(element => {
         try {
             element.send('UPDATE')
-        } catch (ex) {
-            console.log(ex);
+        } catch (exception) {
+            console.log('Broadcast update failed for elemenent', element, 'with exception', exception);
         }
     });
 }
