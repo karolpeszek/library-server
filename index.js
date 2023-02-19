@@ -73,7 +73,7 @@ app.post('/registerKey', function (req, res) {
             const registrationObject = JSON.parse(postData);
             let decodedResetToken = null;
             try {
-                decodedResetToken = jwt.verify(registrationObject.resetToken, pubkey, { algorithm: 'PS512' });
+                decodedResetToken = jwt.verify(registrationObject.resetToken, pubkey, { algorithm: 'ES512' });
             } catch (exception) {
                 console.log(exception);
                 throw 'ERROR_TOKEN_OR_SIGNATURE_INVALID';
@@ -169,7 +169,7 @@ async function sendKeyRegistrationMail(email) {
 
     }
 
-    const token = jwt.sign(claims, privkey, { algorithm: 'PS512' });
+    const token = jwt.sign(claims, privkey, { algorithm: 'ES512' });
     const url = await createRedirect('https://library.karol.gay/keyreset.html?token=' + token);
 
     let messageText = fs.readFileSync(__dirname + '/mail.txt').toString();
@@ -395,7 +395,7 @@ wssLogin.on("connection", ws => {
                     uuid: user.uuid,
                     admin: user.admin == 1
                 }
-                let token = jwt.sign(trustCookieObject, privkey, { algorithm: 'PS512' });
+                let token = jwt.sign(trustCookieObject, privkey, { algorithm: 'ES512' });
                 let cookie = 'token=' + token + ';secure;path=/;expires=' + trustCookieObject.exp;
 
 
@@ -420,7 +420,7 @@ async function getUserFromCookie(cookie) {
     if (!cookie) throw 'UNAUTHORIZED';
     let decodedCookie = null;
     try {
-        decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'PS512' });
+        decodedCookie = jwt.verify(cookie, pubkey, { algorithm: 'ES512' });
     } catch (exception) {
         console.log(exception);
         throw 'ERROR_COOKIE_OR_SIGNATURE_INVALID';
