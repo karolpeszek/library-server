@@ -235,7 +235,7 @@ app.post('/register', function (req, res) {
                 .match(
                     /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/
                 )) throw 'INVALID_EMAIL_ADDRESS';
-            let emailSearchResult = await conn.query('SELECT * FROM USERS WHERE email=?', [email]);
+            let emailSearchResult = await conn.query('SELECT * FROM users WHERE email=?', [email]);
             if (emailSearchResult.length == 1) throw 'EMAIL_ALREADY_TAKEN';
 
 
@@ -824,6 +824,7 @@ app.get('/users/get*', async function (req, res) {
                 name: usersResponse[i].name,
                 email: usersResponse[i].email,
                 admin: usersResponse[i].admin == 1,
+		key: usersResponse[i].keyid,
                 rented: JSON.parse(usersResponse[i].rented)
             });
             res.writeHead(200);
